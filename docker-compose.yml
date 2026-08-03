@@ -40,5 +40,31 @@ services:
       timeout: 5s
       retries: 10
 
+  worker:
+    build: .
+    command: celery -A app.scheduler.celery_app worker --loglevel=info
+    env_file:
+      - .env
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./app:/app/app
+
+  beat:
+    build: .
+    command: celery -A app.scheduler.celery_app beat --loglevel=info
+    env_file:
+      - .env
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./app:/app/app
+
 volumes:
   postgres_data:
