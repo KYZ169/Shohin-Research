@@ -21,12 +21,13 @@ DB保存時は`.name`を、UI表示時は`.value`を使う設計とする。
 
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from decimal import ROUND_HALF_UP, Decimal
 from enum import Enum
 
 from sqlalchemy.orm import Session
 
+from app.core.time import JST
 from app.db.models.profit_snapshot import ProfitSnapshot
 from app.domain.enums import ProfitScenario
 
@@ -38,8 +39,6 @@ __all__ = [
     "calc_profit_scenarios",
     "save_profit_snapshots",
 ]
-
-JST = timezone(timedelta(hours=9))
 
 
 class ExcludedCostItem(str, Enum):

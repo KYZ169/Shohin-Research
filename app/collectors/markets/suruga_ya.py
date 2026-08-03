@@ -26,7 +26,7 @@ from selectolax.parser import HTMLParser
 
 from app.collectors.base import FetchError, ParseError, RawFetchResult
 from app.collectors.markets.base import MarketCollector, MarketDataType, MarketObservation
-from app.collectors.sources.ichiban_kuji import JST
+from app.core.time import JST
 
 SEARCH_URL = "https://www.suruga-ya.jp/kaitori/search_buy"
 

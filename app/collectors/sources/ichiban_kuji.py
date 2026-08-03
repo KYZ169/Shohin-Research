@@ -19,7 +19,7 @@ CLAUDE.md 1.1 / 8.5, 実装仕様書9章の実測結果に基づく:
 """
 
 import re
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 
 import httpx
@@ -33,9 +33,8 @@ from app.collectors.base import (
     RawFetchResult,
     SourceCollector,
 )
+from app.core.time import JST
 from app.domain.enums import FulfillmentType, RegionSource, SupportedEventType
-
-JST = timezone(timedelta(hours=9))
 
 ICHIBAN_KUJI_TOP_URL = "https://1kuji.com/"
 BANDAISPIRITS_DETAIL_URL_TEMPLATE = (
