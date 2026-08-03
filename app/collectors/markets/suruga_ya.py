@@ -38,8 +38,25 @@ CATEGORY_FIGURES = "50102"
 CATEGORY_TRADING_FIGURES = "50103"
 
 DETAIL_URL_PATTERN = re.compile(r"https://www\.suruga-ya\.jp/kaitori/kaitori_detail/(?P<code>[A-Za-z0-9]+)")
-# Fixture注記5
+# Fixture(suruga_ya_kaitori_search_20260803.md)注記5。
+# suruga_ya_jan_confirmation_20260803.md注記3で、管理番号には"GU"+数字だけでなく
+# 数字のみの形式(雑貨・小物カテゴリ、例:"608000898")もあることが確認されている。
+# ただしテキストからの素の数字マッチはJANコード(13桁)と衝突しうるため、
+# 管理番号は基本的にDETAIL_URL_PATTERN(href由来、GU/数字どちらの形式も
+# [A-Za-z0-9]+でカバー済み)で取得し、このパターンはGU形式のテキストフォールバックに限定する。
 MANAGEMENT_NUMBER_PATTERN = re.compile(r"GU\d+")
+# suruga_ya_jan_confirmation_20260803.md注記1: 「発売日/型番/JANコード/管理番号」列に
+# 13桁の数字(JAN)と管理番号がスペース区切りで併記されるケースがある。
+# 例: "4983164650440     608000898"
+JAN_AND_ID_PATTERN = re.compile(r"(?P<jan>\d{13})\s+(?P<id>\S+)")
+# 同注記4: 画像URLのshinabanパラメータも管理番号と一致する(例: shinaban=608000898001)ため、
+# フォールバックとして使える、との示唆があった。ただし現在の実装では_find_detail_anchor()と
+# _build_observation()のcode_match抽出が同じDETAIL_URL_PATTERNを使っており、アンカーが
+# 見つかった時点でcode_matchも必ず成功する(=URL由来の抽出が失敗してshinabanへフォール
+# バックする経路が到達不能)。実装してもテストできない死んだコードになるため、
+# 現時点ではフォールバックとして実装しない(要検討: 将来DOM構造の違いでアンカー検出と
+# コード抽出が分離しうる場合に再検討する)。そのため画像src取得用のヘルパーや
+# shinaban抽出用の正規表現定数もあえて追加していない。
 RELEASE_DATE_PATTERN = re.compile(r"(?P<y>\d{4})/(?P<mo>\d{2})/(?P<d>\d{2})")
 # Fixture注記2: 通常価格(無鑑定品)
 PRICE_PATTERN = re.compile(r"(?P<amount>[\d,]+)円")
@@ -119,7 +136,11 @@ class SurugaYaCollector(MarketCollector):
         return observations
 
     def _build_observation(
-        self, product_ref: str, detail_url: str, title: str, row_text: str
+        self,
+        product_ref: str,
+        detail_url: str,
+        title: str,
+        row_text: str,
     ) -> MarketObservation:
         code_match = DETAIL_URL_PATTERN.match(detail_url)
         management_number = code_match["code"] if code_match else None
@@ -132,14 +153,18 @@ class SurugaYaCollector(MarketCollector):
         if date_match:
             release_date = date(int(date_match["y"]), int(date_match["mo"]), int(date_match["d"]))
 
+        # suruga_ya_jan_confirmation_20260803.md注記1: 一覧ページの時点でJANコードが
+        # 取得できるケースがある(13桁の数字)。注記2のとおり全商品にあるわけではないため
+        # nullable前提は変えず、取れた場合のみ設定する。
+        jan_match = JAN_AND_ID_PATTERN.search(row_text)
+        jan = jan_match["jan"] if jan_match else None
+
         extra: dict = {
             "title": title,  # Product Matcher(app/matcher/product_matcher.py)での商品名照合に使う
             "management_number": management_number,
             "detail_url": detail_url,
             "release_date": release_date,
-            # Fixture注記1: 一覧ページだけではJANコードの実値が確認できていないためTODO。
-            # 詳細ページ(kaitori_detail/{管理番号})への追加アクセスが必要かは本番環境で要確認。
-            "jan": None,
+            "jan": jan,
         }
         if PRICE_RISING_TAG in row_text:
             extra["trend"] = "price_rising"

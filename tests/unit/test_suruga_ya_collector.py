@@ -62,6 +62,25 @@ SEARCH_RESULTS_HTML = f"""
 """
 
 
+# tests/fixtures/html/suruga_ya_jan_confirmation_20260803.md を<table>に再構成したもの。
+# 雑貨・小物カテゴリではJANコード(13桁)が一覧ページ時点で取得でき、管理番号も
+# "GU"+数字ではなく数字のみの形式になる(注記1・3)。全角スペース(U+3000)が
+# JANコードと管理番号の区切りに使われている点もFixtureのまま再現している。
+JAN_CONFIRMATION_HTML = f"""
+<html><body><table>
+{HEADER_ROW}
+<tr>
+<td></td><td><img src="https://example.com/img.jpg?shinaban=608000898001"></td>
+<td>小物(キャラクター) <br>
+<a href="https://www.suruga-ya.jp/kaitori/kaitori_detail/608000898">一番くじ 西尾維新アニメプロジェクト</a></td>
+<td>4983164650440　608000898</td>
+<td>メールにてお見積</td>
+<td><a href="https://www.suruga-ya.jp/kaitori/kaitori_detail/608000898">詳細</a></td>
+</tr>
+</table></body></html>
+"""
+
+
 def _raw(url: str, html: str) -> RawFetchResult:
     return RawFetchResult(url=url, status_code=200, html=html, fetched_at=datetime.now(tz=JST))
 
@@ -127,8 +146,8 @@ def test_parse_observations_email_quote_case_never_uses_dummy_amount():
     assert quote_item.extra["quote_required"] is True
 
 
-def test_parse_observations_jan_is_none_and_marked_as_todo():
-    """Fixture未検証項目: 一覧ページにJAN実値が無いためNoneのままにする。"""
+def test_parse_observations_jan_is_none_when_not_present_in_trading_card_rows():
+    """suruga_ya_jan_confirmation_20260803.md注記2: トレカ系カテゴリではJAN記載が無い。"""
     collector = SurugaYaCollector()
 
     observations = collector.parse_observations(_raw(_search_url(), SEARCH_RESULTS_HTML))
@@ -156,3 +175,67 @@ def test_filter_irrelevant_default_is_pass_through():
     observations = collector.parse_observations(_raw(_search_url(), SEARCH_RESULTS_HTML))
 
     assert collector.filter_irrelevant(observations, product_hint=None) == observations
+
+
+# --- suruga_ya_jan_confirmation_20260803.md: JANコード抽出(タスク15) ---
+
+
+def test_parse_observations_extracts_jan_code_when_present():
+    """注記1: 「発売日/型番/JANコード/管理番号」列の13桁数値をJANコードとして抽出する。"""
+    collector = SurugaYaCollector()
+
+    observation = collector.parse_observations(_raw(_search_url(""), JAN_CONFIRMATION_HTML))[0]
+
+    assert observation.extra["jan"] == "4983164650440"
+
+
+def test_parse_observations_extracts_numeric_only_management_number():
+    """注記3: 管理番号は"GU"+数字だけでなく数字のみの形式もある(雑貨・小物カテゴリ)。"""
+    collector = SurugaYaCollector()
+
+    observation = collector.parse_observations(_raw(_search_url(""), JAN_CONFIRMATION_HTML))[0]
+
+    assert observation.extra["management_number"] == "608000898"
+    assert isinstance(observation.extra["management_number"], str)
+
+
+def test_parse_observations_supports_both_management_number_formats_in_one_call():
+    """トレカ系("GU"+数字)と雑貨・小物系(数字のみ)の両方が同じ検索結果に混在しても
+    正しく管理番号を抽出できることを確認する。"""
+    collector = SurugaYaCollector()
+    mixed_html = f"""
+    <html><body><table>
+    {HEADER_ROW}
+    <tr>
+    <td></td><td><img src="a.jpg"></td>
+    <td>遊戯王/UR/魔法 <br>
+    <a href="https://www.suruga-ya.jp/kaitori/kaitori_detail/GU630031">LOCH-JP003[UR]：黒魔導のカーテン</a></td>
+    <td>2026/02/28 GU630031</td>
+    <td>400円</td>
+    <td><a href="https://www.suruga-ya.jp/kaitori/kaitori_detail/GU630031">詳細</a></td>
+    </tr>
+    <tr>
+    <td></td><td><img src="https://example.com/img.jpg?shinaban=608000898001"></td>
+    <td>小物(キャラクター) <br>
+    <a href="https://www.suruga-ya.jp/kaitori/kaitori_detail/608000898">一番くじ 西尾維新アニメプロジェクト</a></td>
+    <td>4983164650440　608000898</td>
+    <td>メールにてお見積</td>
+    <td><a href="https://www.suruga-ya.jp/kaitori/kaitori_detail/608000898">詳細</a></td>
+    </tr>
+    </table></body></html>
+    """
+
+    observations = collector.parse_observations(_raw(_search_url(""), mixed_html))
+    management_numbers = {o.extra["management_number"] for o in observations}
+
+    assert management_numbers == {"GU630031", "608000898"}
+    jan_by_management_number = {o.extra["management_number"]: o.extra["jan"] for o in observations}
+    assert jan_by_management_number["GU630031"] is None
+    assert jan_by_management_number["608000898"] == "4983164650440"
+
+
+# 注記4(画像URLのshinabanパラメータへのフォールバック)は実装していない。
+# _find_detail_anchor()と_build_observation()のcode_match抽出が同じDETAIL_URL_PATTERNに
+# 依存しているため、アンカーが見つかった時点でcode_matchも必ず成功し、
+# 「URL由来の抽出が失敗した場合」という前提そのものが到達不能(=テスト不可能な死んだコード)
+# になるため、app/collectors/markets/suruga_ya.py側で意図的に実装を見送っている。
