@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from app.core.time import JST
-from app.domain.enums import FulfillmentType, RegionSource
+from app.domain.enums import FulfillmentType, MatchStatus, RegionSource
 from app.profit.profit_engine import ExcludedCostItem
 
 __all__ = [
@@ -46,6 +46,18 @@ FULFILLMENT_LABELS: dict[FulfillmentType, str] = {
 REGION_UNKNOWN_LABEL = "地域情報不明(全国対象として表示)"
 AREA_GROUP_SUFFIX = "（大まかな範囲のみ判明・要確認）"
 
+# 技術分析レポート11.3原則3: 「高確率一致であっても、初回は必ず通知に『要確認』
+# フラグを出し、ユーザーが誤りに気づけるようにする」を満たすための表示ラベル。
+# AUTO_MATCH/MANUALLY_CONFIRMEDはラベル無し(=フィールド自体を出さない)。
+# HIGH_PROBABILITY_MATCHとNEEDS_REVIEWは警戒レベルが異なるため、文言を明確に
+# 分ける(ユーザー指摘: 同じ「要確認」で一括りにしない)。
+# 地域側の「要確認」(_build_region_line参照)とは別のフィールド名(「商品照合」)で
+# 出すことで、地域の要確認と商品照合の要確認を視覚的に混同しないようにしている。
+MATCH_STATUS_LABELS: dict[MatchStatus, str] = {
+    MatchStatus.HIGH_PROBABILITY_MATCH: "高確率一致・念のためご確認ください",
+    MatchStatus.NEEDS_REVIEW: "要確認・別商品の可能性があります",
+}
+
 
 @dataclass
 class OpportunityView:
@@ -64,6 +76,7 @@ class OpportunityView:
     region_display_text: str | None
     displayed_profit: int
     excluded_cost_items: list[ExcludedCostItem]
+    match_status: MatchStatus
     deadline_at: datetime | None
     source_url: str
     recent_sold_count: int | None
@@ -99,6 +112,17 @@ def _build_region_line(opp: OpportunityView) -> str:
     return region_line
 
 
+def _build_match_status_field(match_status: MatchStatus) -> dict | None:
+    """商品照合(Product Matcher)の確信度を示す独立フィールド。AUTO_MATCH等、
+    確認不要なステータスの場合はNoneを返し、フィールド自体を出さない
+    (=Embed上に何も表示しない、というのが「表示なし」の意味)。
+    """
+    label = MATCH_STATUS_LABELS.get(match_status)
+    if label is None:
+        return None
+    return {"name": "商品照合", "value": label, "inline": True}
+
+
 def _build_profit_note(opp: OpportunityView) -> str:
     if not opp.excluded_cost_items:
         return f"想定利益: ¥{opp.displayed_profit:,}"
@@ -114,6 +138,9 @@ def build_embed(opp: OpportunityView) -> dict:
     """実装仕様書4.1のEmbed構成。excluded_cost_itemsの有無で表示を分岐し、
     region_source=area_groupの場合は要確認の注記を付ける。deadline_at=Noneの
     場合は「締切は公式サイトでご確認ください」+リンクで代替する(実装仕様書9章)。
+
+    match_status(HIGH_PROBABILITY_MATCH/NEEDS_REVIEW)の場合は「商品照合」という
+    独立フィールドを追加する(技術分析11.3原則3。地域の「要確認」とは別フィールド)。
     """
     deadline_field_value = (
         format_jst(opp.deadline_at)
@@ -121,18 +148,21 @@ def build_embed(opp: OpportunityView) -> dict:
         else f"締切は公式サイトでご確認ください([リンク]({opp.source_url}))"
     )
 
-    return {
-        "title": opp.product_name,
-        "url": opp.apply_url,
-        "thumbnail": {"url": opp.image_url} if opp.image_url else None,
-        "color": color_by_confidence(opp.confidence),
-        "fields": [
-            {"name": "仕入先", "value": opp.source_name, "inline": True},
-            {"name": "仕入価格", "value": f"¥{opp.purchase_price:,}", "inline": True},
-            {"name": "最良売却先", "value": opp.best_channel_name, "inline": True},
-            {"name": "相場信頼度", "value": opp.confidence, "inline": True},
-            {"name": "受取方法", "value": fulfillment_label(opp.fulfillment_type), "inline": True},
-            {"name": "対象地域", "value": _build_region_line(opp), "inline": True},
+    fields = [
+        {"name": "仕入先", "value": opp.source_name, "inline": True},
+        {"name": "仕入価格", "value": f"¥{opp.purchase_price:,}", "inline": True},
+        {"name": "最良売却先", "value": opp.best_channel_name, "inline": True},
+        {"name": "相場信頼度", "value": opp.confidence, "inline": True},
+        {"name": "受取方法", "value": fulfillment_label(opp.fulfillment_type), "inline": True},
+        {"name": "対象地域", "value": _build_region_line(opp), "inline": True},
+    ]
+
+    match_status_field = _build_match_status_field(opp.match_status)
+    if match_status_field is not None:
+        fields.append(match_status_field)
+
+    fields.extend(
+        [
             {"name": "想定利益", "value": _build_profit_note(opp), "inline": False},
             {"name": "締切日時", "value": deadline_field_value, "inline": True},
             {
@@ -145,6 +175,14 @@ def build_embed(opp: OpportunityView) -> dict:
                 "value": str(opp.listing_count) if opp.listing_count is not None else "取得不可",
                 "inline": True,
             },
-        ],
+        ]
+    )
+
+    return {
+        "title": opp.product_name,
+        "url": opp.apply_url,
+        "thumbnail": {"url": opp.image_url} if opp.image_url else None,
+        "color": color_by_confidence(opp.confidence),
+        "fields": fields,
         "footer": {"text": f"最終取得: {format_jst(opp.fetched_at)} / 情報元: {opp.source_url}"},
     }

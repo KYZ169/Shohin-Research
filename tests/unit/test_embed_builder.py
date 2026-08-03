@@ -9,7 +9,7 @@ from datetime import datetime
 import pytest
 
 from app.core.time import JST
-from app.domain.enums import FulfillmentType, RegionSource
+from app.domain.enums import FulfillmentType, MatchStatus, RegionSource
 from app.notification.embed_builder import (
     OpportunityView,
     build_embed,
@@ -35,6 +35,7 @@ def _base_opp(**overrides) -> OpportunityView:
         region_display_text=None,
         displayed_profit=900,
         excluded_cost_items=[],
+        match_status=MatchStatus.AUTO_MATCH,
         deadline_at=None,
         source_url="https://1kuji.com/products/cutiestreet",
         recent_sold_count=None,
@@ -73,6 +74,52 @@ def test_build_embed_region_unknown_shows_nationwide_label():
     opp = _base_opp(region_source=RegionSource.UNKNOWN, region_display_text=None)
 
     assert _field(build_embed(opp), "対象地域")["value"] == "地域情報不明(全国対象として表示)"
+
+
+def test_build_embed_match_status_high_probability_match_shows_softer_warning():
+    """技術分析11.3原則3: HIGH_PROBABILITY_MATCHはNEEDS_REVIEWより弱い注意喚起にする。"""
+    opp = _base_opp(match_status=MatchStatus.HIGH_PROBABILITY_MATCH)
+
+    field = _field(build_embed(opp), "商品照合")
+
+    assert field["value"] == "高確率一致・念のためご確認ください"
+
+
+def test_build_embed_match_status_needs_review_shows_stronger_warning():
+    opp = _base_opp(match_status=MatchStatus.NEEDS_REVIEW)
+
+    field = _field(build_embed(opp), "商品照合")
+
+    assert field["value"] == "要確認・別商品の可能性があります"
+
+
+def test_build_embed_match_status_auto_match_shows_no_field():
+    """AUTO_MATCHは確認不要のため「商品照合」フィールド自体を出さない。"""
+    opp = _base_opp(match_status=MatchStatus.AUTO_MATCH)
+
+    embed = build_embed(opp)
+
+    assert all(f["name"] != "商品照合" for f in embed["fields"])
+
+
+def test_build_embed_match_status_field_is_distinct_from_region_review_field():
+    """ユーザー指摘: 地域の「要確認」と商品照合の「要確認」を同じfield/文言で
+    混同しないこと。両方が同時に発生しても別々のfieldとして出ることを確認する。"""
+    opp = _base_opp(
+        region_source=RegionSource.AREA_GROUP,
+        region_display_text="東海地方",
+        match_status=MatchStatus.NEEDS_REVIEW,
+    )
+
+    embed = build_embed(opp)
+    region_field = _field(embed, "対象地域")
+    match_field = _field(embed, "商品照合")
+
+    assert region_field["name"] != match_field["name"]
+    assert "大まかな範囲のみ判明・要確認" in region_field["value"]
+    assert match_field["value"] == "要確認・別商品の可能性があります"
+    # 商品照合フィールドの文言に地域側の要確認文言が混入していないこと
+    assert "大まかな範囲" not in match_field["value"]
 
 
 def test_build_embed_region_area_group_appends_review_suffix():

@@ -175,15 +175,19 @@ def test_collect_to_notification_pipeline_end_to_end(db_session, redis_client):
             observation=observation,
             standard_displayed_profit=build_result.standard_displayed_profit,
             standard_excluded_cost_items=build_result.standard_excluded_cost_items,
+            match_status=market_match_status,
             target_prefectures=set(),
         )
 
         assert decision.should_send is True
         assert decision.dedupe_result.decision == DedupeDecision.NEW
         assert decision.embed["title"] == "一番くじ しぐれうい 第2弾（仮）"
-        assert "想定利益: ¥410" in decision.embed["fields"][6]["value"]
-        assert "送料不明" in decision.embed["fields"][6]["value"]
-        assert decision.embed["fields"][7]["value"].startswith("締切は公式サイトでご確認ください")
+        assert "想定利益: ¥410" in _field(decision.embed, "想定利益")["value"]
+        assert "送料不明" in _field(decision.embed, "想定利益")["value"]
+        assert _field(decision.embed, "締切日時")["value"].startswith("締切は公式サイトでご確認ください")
+        # market_match_status=NEEDS_REVIEWのため「商品照合」フィールドが出て、
+        # 地域側の「対象地域」フィールドとは別に要確認情報が表示されること
+        assert _field(decision.embed, "商品照合")["value"] == "要確認・別商品の可能性があります"
 
         # 同一内容で再評価すると、dedupe判定によりUNCHANGEDとなり送信しない
         second_decision = evaluate_notification(
@@ -195,12 +199,17 @@ def test_collect_to_notification_pipeline_end_to_end(db_session, redis_client):
             observation=observation,
             standard_displayed_profit=build_result.standard_displayed_profit,
             standard_excluded_cost_items=build_result.standard_excluded_cost_items,
+            match_status=market_match_status,
             target_prefectures=set(),
         )
         assert second_decision.should_send is False
         assert second_decision.dedupe_result.decision == DedupeDecision.UNCHANGED
     finally:
         redis_client.delete(f"notification:{event_id}")
+
+
+def _field(embed: dict, name: str) -> dict:
+    return next(f for f in embed["fields"] if f["name"] == name)
 
 
 def test_ingest_normalized_item_is_idempotent_on_repeated_collection(db_session):

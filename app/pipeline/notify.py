@@ -14,7 +14,7 @@ from dataclasses import dataclass
 
 from app.collectors.markets.base import MarketObservation
 from app.db.models import Product, ReleaseEvent, Shop, Source
-from app.domain.enums import ShopGranularity
+from app.domain.enums import MatchStatus, ShopGranularity
 from app.matcher.region_resolver import resolve_region, should_include_for_region_filter
 from app.notification.dedupe import (
     DedupeCheckResult,
@@ -47,9 +47,15 @@ def evaluate_notification(
     observation: MarketObservation,
     standard_displayed_profit,
     standard_excluded_cost_items: list[ExcludedCostItem],
+    match_status: MatchStatus,
     target_prefectures: set[str],
 ) -> NotificationDecision:
-    """実装仕様書4.3の地域フィルタ→4.2のdedupe判定→4.1のEmbed組み立てを一連実行する。"""
+    """実装仕様書4.3の地域フィルタ→4.2のdedupe判定→4.1のEmbed組み立てを一連実行する。
+
+    match_statusはmarket_matching.match_observation_to_product()等が返した
+    Product Matcherの照合結果。build_embed()がHIGH_PROBABILITY_MATCH/NEEDS_REVIEWの
+    場合に「商品照合」フィールドを追加する(技術分析11.3原則3、地域の要確認とは別表示)。
+    """
     resolved_region = resolve_region(release_event, shop)
 
     if not should_include_for_region_filter(resolved_region, release_event.fulfillment_type, target_prefectures):
@@ -107,6 +113,7 @@ def evaluate_notification(
         region_display_text=resolved_region.display_text,
         displayed_profit=int(standard_displayed_profit),
         excluded_cost_items=standard_excluded_cost_items,
+        match_status=match_status,
         deadline_at=release_event.deadline_at,
         source_url=release_event.product_url,
         recent_sold_count=None,
