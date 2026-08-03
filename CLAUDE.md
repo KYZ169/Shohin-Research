@@ -108,6 +108,55 @@
 一番くじと並ぶ最優先候補に格上げする。** 次のCollector実装候補はプレバンより
 ポケモンセンターオンラインを優先することを推奨。
 
+### 1.5 本番ConoHa VPSでの実データ検証結果(2026-08-03、タスク17)
+
+タスク4・6・14実装時点ではすべてMarkdown変換済みテキストのFixtureをもとにした
+テキストパターンベースの推測実装であり、実際の生HTMLでの動作は未検証だった。
+ユーザーが本番ConoHa VPS上で実際にfetchした生HTML(`tests/fixtures/raw_html/`配下、
+`raw_1kuji_top.html`/`raw_suruga_ya_search.html`/`raw_pokemon_center.html`)による
+検証の結果、以下の問題が実際に発生することを確認し、修正した。
+
+- **一番くじ(1kuji.com)**: `parse()`が「PICK UP ITEMを1件も抽出できませんでした」で
+  完全に失敗した。原因は2点:
+  1. 商品詳細ページへのリンクは絶対URL(`https://1kuji.com/products/{slug}`)ではなく
+     相対パス(`/products/{slug}`)だった。
+  2. 「店頭販売」「オンライン販売」というラベルは、日付テキストと同じ要素内に
+     連結されているのではなく、`<p class="status shop">`/`<p class="status online">`
+     という別要素になっており、日付側の`<p class="date">`にはラベル文言を含まない。
+  → `section.pickupCol div.swiper-slide`をCSSセレクタで直接走査し、`p.status`の
+  直近クラス(shop/online)を見て後続の`p.date`をどちらの日付として扱うか判定する
+  実装に書き換えた(`app/collectors/sources/ichiban_kuji.py`)。実データで
+  PICK UP ITEM 15件すべてが正しく抽出できることを確認済み。
+  なお、bandaispirits.co.jpの商品詳細ページは今回生HTMLの提供が無く、
+  引き続きFixtureベースの未検証状態のまま(同様の問題が起きる可能性がある、要検証)。
+- **駿河屋(suruga-ya.jp)**: `parse_observations()`が`TypeError`で失敗した(前回報告の
+  `_find_detail_anchor()`バグの実体)。原因は2点:
+  1. 詳細ページへのリンクが絶対URLではなく相対パス(`/kaitori/kaitori_detail/{管理番号}`)
+     だった(`DETAIL_URL_PATTERN`が一致せず、行内の候補アンカーが1件も見つからない)。
+  2. 全選択チェックボックス用のリンク等、`href=""`の`<a>`要素をselectolaxが`None`として
+     返すことがあり、`.get("href", "")`では拾いきれず`DETAIL_URL_PATTERN.match(None)`で
+     `TypeError`になっていた。
+  → `DETAIL_URL_PATTERN`を絶対/相対どちらのURLにも一致するよう修正し、`urljoin()`で
+  絶対URLに変換して保持するようにした。`.get("href") or ""`でNoneも吸収するよう修正した
+  (`app/collectors/markets/suruga_ya.py`)。JANコード抽出・[価格上昇中]タグ・
+  「メールにてお見積」の検出はいずれも実データでそのまま機能することを確認済み。
+  ただし鑑定品価格(【PSA/GEM MT 10】等)は今回取得した実データに該当商品が
+  含まれておらず未検証のまま(要検証)。
+- **ポケモンセンターオンライン**: 「各種期間」の4フィールド(応募期間/結果発表日/
+  購入期間/お届け時期)の抽出はラベル+値のテキストパターンマッチのまま実データでも
+  正しく機能した。一方、価格だけは`price=None`になる問題があった。原因は、実際のDOMでは
+  金額の数字("5,800")と単位("円")・税込表記が`<span class="txt">5,800<small>円</small>
+  </span><small class="sml">税込</small>`のように別要素(入れ子)に分かれており、
+  行単位でテキストをフラット化すると別の行になってしまうため。
+  → 価格の正規表現を、行単位ではなく本文全体に対して空白文字(改行含む)を許容する形で
+  検索するよう修正した(`app/collectors/sources/pokemon_center_online.py`)。
+  在庫状況ラベルの判定も、価格行を境界にした行範囲検索から、本文全体の最初の一致を
+  採用する単純な方式に変更した(実データでも正しく「品切れ」を拾えることを確認済み)。
+
+**3サイトとも、`tests/fixtures/raw_html/`配下の生HTMLをそのまま読み込む統合テストを
+各Collectorのテストファイルに追加済み(`test_..._against_raw_html_fixture`)。**
+今後DOM構造が変わった場合はこれらのテストが検知する。
+
 ---
 
 ## 2. Phase 0 の具体的な着手タスク（進捗管理表）
@@ -121,9 +170,9 @@
 | 1 | リポジトリ初期化・Docker Compose | 実装仕様書 Prompt 1 | ✅ 完了 |
 | 2 | 基本DBモデル + Alembicマイグレーション | 実装仕様書 Prompt 2・1章 | ✅ 完了 |
 | 3 | SourceCollector基底クラス実装 | 実装仕様書 Prompt 3・9章 | ✅ 完了 |
-| 4 | 一番くじCollector実装（`1kuji.com`+`bandaispirits.co.jp`、`on-line.1kuji.com`除外） | 実装仕様書9章の正規表現パターン | ✅ 完了（Fixtureベース、生HTML未検証） |
+| 4 | 一番くじCollector実装（`1kuji.com`+`bandaispirits.co.jp`、`on-line.1kuji.com`除外） | 実装仕様書9章の正規表現パターン | ✅ 完了（トップページは本番VPS生HTMLで検証済み・CSSセレクタベースに書き換え。bandaispirits.co.jp詳細ページはFixtureベースのまま未検証、1.5節参照） |
 | 5 | プレミアムバンダイCollector実装 | 実装仕様書 Prompt 3拡張 | ⏸ 保留（`deadline_itemlist`はJS依存(SPA)のため取得不可と判明。個別商品ページ(cp932対応)に方針変更、Fixture未整備） |
-| 6 | 駿河屋Market Collector実装 | 実装仕様書10章・Prompt 4 | ✅ 完了（Fixtureベース、生HTML未検証。JANコード抽出はタスク15で追加対応済み） |
+| 6 | 駿河屋Market Collector実装 | 実装仕様書10章・Prompt 4 | ✅ 完了（本番VPS生HTMLで検証済み。相対href・href=None対応の修正済み、1.5節参照。JANコード抽出(タスク15)も実データで確認済み） |
 | 7 | 地域解決ロジック実装（`resolve_region()`、`fulfillment_type`フィルタ） | 実装仕様書1.3節、4.3節 | ✅ 完了 |
 | 8 | 商品照合スコアリング実装（JAN一致・商品名類似度・単位不一致ペナルティ等） | 技術分析レポート11章 | ✅ 完了（単位不一致は減点ではなく89点上限キャップとして実装、None属性は不一致判定しない） |
 | 9 | Profit Engine実装（未確定コスト分離ロジック必須） | 実装仕様書2章・Prompt 5 | ✅ 完了（未確定コストは金額計算から完全除外、確認済み） |
@@ -131,9 +180,10 @@
 | 11 | Discord通知実装（締切不明時フォールバック含む） | 実装仕様書4章・Prompt 7 | ✅ 完了（商品照合match_statusの可視化を追加修正済み。地域の要確認とは別フィールドで表示） |
 | 12 | Celery Beatでの定期実行結線 | — | ✅ 完了（収集結果のDB反映・Opportunity生成は含まず、Collector起動のみ。詳細はタスク13で対応） |
 | 13 | E2Eパイプライン実装（収集→商品照合→Profit Engine→Opportunity→dedupe→Embed組み立て） | — | ✅ 完了（Fixtureベースの統合テストのみ、実サイトでの動作は未検証） |
-| 14 | ポケモンセンターオンラインCollector実装 | 本ファイル1.4節のFixture・正規表現パターン | ✅ 完了（Fixtureベース、生HTML未検証。各種期間4フィールド抽出済み） |
-| 15 | 駿河屋CollectorへJANコード抽出を追加 | 本ファイル1.3節のFixture(`suruga_ya_jan_confirmation_20260803.md`) | ✅ 完了 |
+| 14 | ポケモンセンターオンラインCollector実装 | 本ファイル1.4節のFixture・正規表現パターン | ✅ 完了（本番VPS生HTMLで検証済み。各種期間4フィールドはそのまま機能、価格抽出のみ実データ不一致が判明し修正、1.5節参照） |
+| 15 | 駿河屋CollectorへJANコード抽出を追加 | 本ファイル1.3節のFixture(`suruga_ya_jan_confirmation_20260803.md`) | ✅ 完了（本番VPS生HTMLでも抽出できることを確認済み） |
 | 16 | Discord Bot Interaction実装（応募済み/ウォッチ/非表示ボタン） | 実装仕様書14章 | ✅ 完了（discord.pyのゲートウェイ実接続のみ未検証） |
+| 17 | 一番くじ/駿河屋/ポケモンセンターオンラインの本番VPS実データ検証・修正 | `docs/verification_checklist.md`、`scripts/verify_collectors.py` | ✅ 完了（詳細は1.5節参照） |
 
 **タスク7・8の分離について**: 当初「タスク7 = Product Matcher実装（地域解決ロジック含む）」と
 一つにまとめていたが、実装仕様書Prompt 4が地域解決ロジックのみを指しているのに対し、
@@ -162,5 +212,9 @@
 - ポケモンセンターオンラインの商品一覧ページ（カテゴリ別・新着別）のURL・構造確認（個別ページのURLパターンから商品コードを収集する巡回設計に必要、タスク14の報告参照）
 - ポケモンセンターオンラインの商品コードがJANコードと一致するかの確認
 - Discord Bot側のInteraction実装（実装済み。discord.pyのゲートウェイ実接続のみ未検証、タスク16の報告参照）
+- ~~一番くじ/駿河屋/ポケモンセンターオンラインの本番VPS実データ検証~~ → **確認済み(1.5節・タスク17)。判明した問題は修正済み**
+- bandaispirits.co.jpの商品詳細ページの生HTML取得・検証（1.5節のとおり、一番くじトップページとは異なり今回は生HTMLの提供が無く未検証のまま。同様の構造不一致が起きている可能性がある）
+- 駿河屋の鑑定品価格(【PSA/GEM MT 10】等)の実データでの動作確認（1.5節参照。今回取得した実データに該当商品が含まれていなかったため未検証）
+- ポケモンセンターオンラインの通常販売ページ(「各種期間」セクションが無いページ)の実データ確認（現状は合成テストケースのみで判定ロジックを検証しており、実際の通常販売ページ構造とは未照合。要検証）
 
 これらは実装を進めながら随時実データで確認し、本ファイルおよび実装仕様書に追記していく運用とする。

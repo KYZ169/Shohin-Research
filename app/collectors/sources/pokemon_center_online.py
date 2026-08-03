@@ -8,13 +8,23 @@ CLAUDE.md 1.4、Fixture(pokemon_center_online_product_20260803.md)の実測結�
   取得できなかった締切・当選発表・購入期限が、このサイトでは全部取れる
   (CLAUDE.md 1.4で一番くじと並ぶ最優先候補に格上げされた情報源)。
 
-【検証状況に関する重要な注意】
-このモジュールのparse()は、実際の生HTMLではなくMarkdown変換済みテキストのFixture
-(tests/fixtures/html/pokemon_center_online_product_20260803.md)をもとに実装した、
-テキストパターンベース(正規表現・ラベル行に基づく値取得)の抽出ロジックである。
-実サイトの生HTMLタグ構造(class名等)に対しては未検証のため、本番のConoHa VPS環境で
-実際にfetch()した生HTMLに対して再検証・調整が必要
-(app/collectors/sources/ichiban_kuji.py と同様の注意点)。
+【検証状況(2026-08-03、本番ConoHa VPSでの実データ検証により更新)】
+本番VPSで実際に取得した生HTML(tests/fixtures/raw_html/raw_pokemon_center.html)で
+動作検証済み。「各種期間」のラベル+値の並び(`_value_after_label()`によるテキスト
+パターンマッチ)は実データでもそのまま機能し、抽選応募受け付け期間/抽選結果発表日/
+購入および支払い期間/商品のお届け時期の4フィールドとも正しく抽出できることを確認した。
+一方、価格の抽出だけは実データで失敗することが判明し修正した:
+- 価格は`<p class="price default"><span class="txt">5,800<small>円</small></span>
+  <small class="sml">税込</small></p>`のように、金額の数字と「円」「税込」が別々の
+  (入れ子になった)要素に分かれている。`tree.body.text(deep=True, separator="\n")`で
+  フラット化すると「5,800」「円」「税込」がそれぞれ別行になり、1行ずつ検索していた
+  従来のPRICE_PATTERNでは一致しなかった(price=Noneのまま失敗)。行単位ではなく
+  本文全体(text)に対して、空白文字(改行含む)を許容する形でマッチするよう修正した。
+- 在庫状況(品切れ/予約等)のラベルも同様の理由で、価格行を境界とした行範囲検索を
+  やめ、本文全体から最初に一致した行を採用するよう単純化した(実データでも
+  「品切れ」(在庫ラベル)の後、「各種期間」より前の「予約 / 販売期間」という
+  別の文脈で"予約"の語が再度出現するが、最初の一致を採用することで正しく
+  区別できることを確認済み)。
 
 【商品一覧ページ未確認による制約】
 CLAUDE.md 1.4/3節のとおり、商品一覧ページ(カテゴリ別・新着別)のURL・構造が未確認のため、
@@ -56,8 +66,10 @@ from app.domain.enums import FulfillmentType, RegionSource, SupportedEventType
 PRODUCT_URL_TEMPLATE = "https://www.pokemoncenter-online.com/{code}.html"
 PRODUCT_URL_PATTERN = re.compile(r"https://www\.pokemoncenter-online\.com/(?P<code>\d{13})\.html")
 
-# Fixture注記: 「5,800円 税込」のような表記。
-PRICE_PATTERN = re.compile(r"(?P<amount>[\d,]+)円\s*税込")
+# Fixture注記: 「5,800円 税込」のような表記。実データでは金額と「円」「税込」が
+# 別要素に分かれ、フラット化すると間に改行が入るため、\sで改行も許容する
+# (本文全体に対してsearchする。行単位のマッチはしない)。
+PRICE_PATTERN = re.compile(r"(?P<amount>[\d,]+)\s*円\s*税込")
 # Fixture注記: 「お一人様 1点限り」のような表記。
 PURCHASE_LIMIT_COUNT_PATTERN = re.compile(r"お一人様\s*(?P<count>\d+)点限り")
 
@@ -154,19 +166,19 @@ class PokemonCenterOnlineCollector(SourceCollector):
             raise ParseError(f"{raw.url}: 商品タイトル(h1)を抽出できませんでした(構造変更の可能性)")
 
         price: Decimal | None = None
-        price_line_index: int | None = None
-        for index, line in enumerate(lines):
-            price_match = PRICE_PATTERN.search(line)
-            if price_match:
-                price_line_index = index
-                try:
-                    price = Decimal(price_match["amount"].replace(",", ""))
-                except InvalidOperation:
-                    price = None
-                break
+        price_match = PRICE_PATTERN.search(text)
+        if price_match:
+            try:
+                price = Decimal(price_match["amount"].replace(",", ""))
+            except InvalidOperation:
+                price = None
 
+        # 実データ確認済み(raw_pokemon_center.html): 在庫状況ラベルは商品名の直後、
+        # 価格より前に出現する。「予約」は「各種期間」より前の別の文脈
+        # (「予約 / 販売期間 ...」)でも再度出現するが、最初に一致した行を
+        # 採用することで在庫状況ラベルの方を正しく拾える。
         inventory_status: str | None = None
-        for line in lines[:price_line_index] if price_line_index is not None else lines:
+        for line in lines:
             if line in INVENTORY_STATUS_KEYWORDS:
                 inventory_status = line
                 break

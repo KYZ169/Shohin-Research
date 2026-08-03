@@ -1,15 +1,21 @@
 """IchibanKujiCollectorのparse()テスト。
 
-tests/fixtures/html/1kuji_com_top_20260803.md および
-tests/fixtures/html/bandaispirits_detail_20260803.md はMarkdown変換済みテキストであり
-CSSセレクタの検証には使えないため、それぞれのFixtureで観察されたテキストパターン
-(リンクテキストの連結形式、価格/発売日ラベルの並び)を再現した最小限のHTMLに対して
-parse()をテストする。実サイトの生HTML構造そのものに対する検証ではない点に注意
-(app/collectors/sources/ichiban_kuji.py のモジュールdocstring参照)。
+トップページ(_parse_top_page)については、本番ConoHa VPSで実際に取得した生HTML
+(tests/fixtures/raw_html/raw_1kuji_top.html)で動作検証済みであり、本ファイルの
+TOP_PAGE_HTML は実データで確認した実際のDOM構造(section.pickupCol >
+div.swiper-slide > a + div.txtCol > p.status/p.date/p.itemName)を最小限に
+再現したものである(app/collectors/sources/ichiban_kuji.py のモジュールdocstring参照)。
+raw_1kuji_top.htmlそのものを使った検証はtest_parse_top_page_against_raw_html_fixtureで行う。
+
+bandaispirits.co.jpの商品詳細ページ側は、本番VPSでの生HTML取得がまだ行われていないため、
+引き続きtests/fixtures/html/bandaispirits_detail_20260803.md(Markdown変換済みテキスト)
+で観察されたテキストパターンを再現した最小限のHTMLに対するテストのままである
+(実サイトの生HTML構造そのものに対する検証ではない点に注意)。
 """
 
 from datetime import datetime
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
@@ -17,14 +23,47 @@ from app.collectors.base import FetchError, ParseError, RawFetchResult
 from app.collectors.sources.ichiban_kuji import JST, IchibanKujiCollector
 from app.domain.enums import FulfillmentType, RegionSource
 
-# tests/fixtures/html/1kuji_com_top_20260803.md の該当行をそのまま再現
+RAW_HTML_FIXTURE_PATH = Path(__file__).parent.parent / "fixtures" / "raw_html" / "raw_1kuji_top.html"
+
+# 実データ確認済み(raw_1kuji_top.html)の実際のDOM構造を最小限に再現したもの。
+# - 商品詳細へのリンクは絶対URLではなく相対パス"/products/{slug}"
+# - 「店頭販売」「オンライン販売」はp.dateと同じ要素内ではなく、直前のp.statusに分離
+# - 日付テキスト自体は「より発売予定」「より順次発売予定」の両方の表記がある
+# - 商品名はp.itemNameに独立して格納されている(日付テキストの除去が不要)
 TOP_PAGE_HTML = """
-<html><body><div id="pickup">
-<a href="https://1kuji.com/products/cutiestreet">店頭販売2026年08月04日(火)より順次発売予定オンライン販売2026年08月04日(火)17:00より販売開始予定一番くじ CUTIE STREET くじを手にする戦いなのです！</a>
-<a href="https://1kuji.com/products/kingdom6">店頭販売2026年07月31日(金)より順次発売予定オンライン販売2026年08月03日(月)15:00より販売開始予定一番くじ 春秋戦国大戦キングダム The Animation 知と武の両輪</a>
-<a href="https://1kuji.com/products/petitcure">オンライン販売2026年06月24日(水)17:00より販売開始予定一番くじ ぷちきゅあ</a>
+<html><body>
+<section class="pickupCol"><h2>PICK UP ITEM</h2>
+<div class="swiper-wrapper">
+<div class="swiper-slide"><a href="/products/onep104"><img src="https://assets.1kuji.com/onep104.webp" /><div class="txtCol">
+<p class="status shop">店頭販売</p>
+<p class="date">2026年08月08日(土)より発売予定</p>
+<p class="itemName">一番くじ ワンピース -エルバフ編- GIANT BASH!! Vol.2</p>
+</div></a></div>
+<div class="swiper-slide"><a href="/products/cutiestreet"><img src="https://assets.1kuji.com/cutiestreet.webp" /><div class="txtCol">
+<p class="status shop">店頭販売</p>
+<p class="date">2026年08月04日(火)より順次発売予定</p>
+<p class="status online">オンライン販売</p>
+<p class="date">2026年08月04日(火)17:00より販売開始予定</p>
+<p class="itemName">一番くじ CUTIE STREET くじを手にする戦いなのです！</p>
+</div></a></div>
+<div class="swiper-slide"><a href="/products/kingdom6"><img src="https://assets.1kuji.com/kingdom6.webp" /><div class="txtCol">
+<p class="status shop">店頭販売</p>
+<p class="date">2026年07月31日(金)より順次発売予定</p>
+<p class="status online">オンライン販売</p>
+<p class="date">2026年08月03日(月)15:00より販売開始予定</p>
+<p class="itemName">一番くじ 春秋戦国大戦キングダム The Animation 知と武の両輪</p>
+</div></a></div>
+<div class="swiper-slide"><a href="/products/petitcure"><img src="https://assets.1kuji.com/petitcure.webp" /><div class="txtCol">
+<p class="status online">オンライン販売</p>
+<p class="date">2026年06月24日(水)17:00より販売開始予定</p>
+<p class="itemName">一番くじ ぷちきゅあ</p>
+</div></a></div>
 </div>
-<a href="https://1kuji.com/products">商品一覧</a>
+</section>
+<section class="lineupCol"><h2>ラインナップ</h2>
+<a href="/products/some-other-lineup-item">ラインナップ一覧の商品(日付情報なし)</a>
+</section>
+<a href="/products">商品一覧</a>
 </body></html>
 """
 
@@ -72,10 +111,24 @@ def test_parse_top_page_extracts_store_and_online_release_dates():
     assert cutie.extra["store_release_at"] == datetime(2026, 8, 4, tzinfo=JST)
     assert cutie.extra["online_release_at"] == datetime(2026, 8, 4, 17, 0, tzinfo=JST)
     assert cutie.extra["fulfillment_type"] == FulfillmentType.BOTH
+    assert cutie.product_url == "https://1kuji.com/products/cutiestreet"
+    assert cutie.image_urls == ["https://assets.1kuji.com/cutiestreet.webp"]
+
+
+def test_parse_top_page_handles_store_only_item():
+    """実データ確認済み(raw_1kuji_top.html): 店頭販売のみでオンライン販売の記載が無いケース。"""
+    collector = IchibanKujiCollector()
+
+    items = collector.parse(_raw(collector.target_urls[0], TOP_PAGE_HTML))
+
+    onep104 = next(i for i in items if i.product_url.endswith("onep104"))
+    assert onep104.extra["store_release_at"] == datetime(2026, 8, 8, tzinfo=JST)
+    assert onep104.extra["online_release_at"] is None
+    assert onep104.extra["fulfillment_type"] == FulfillmentType.STORE_PICKUP
 
 
 def test_parse_top_page_handles_online_only_item():
-    """Fixture注記2: 店頭販売の記載が無く「オンライン販売」のみのケース。"""
+    """実データ確認済み(raw_1kuji_top.html): 店頭販売の記載が無く「オンライン販売」のみのケース。"""
     collector = IchibanKujiCollector()
 
     items = collector.parse(_raw(collector.target_urls[0], TOP_PAGE_HTML))
@@ -87,14 +140,15 @@ def test_parse_top_page_handles_online_only_item():
     assert petitcure.extra["fulfillment_type"] == FulfillmentType.ONLINE_SHIPPING
 
 
-def test_parse_top_page_ignores_non_pickup_links():
+def test_parse_top_page_ignores_links_outside_pickup_section():
+    """section.pickupCol外のリンク(ラインナップ一覧、商品一覧等)は対象外。"""
     collector = IchibanKujiCollector()
 
     items = collector.parse(_raw(collector.target_urls[0], TOP_PAGE_HTML))
 
-    # "商品一覧"リンクや、日時パターンにマッチしないアンカーは除外される
     assert all(item.product_url != "https://1kuji.com/products" for item in items)
-    assert len(items) == 3
+    assert all("some-other-lineup-item" not in item.product_url for item in items)
+    assert len(items) == 4
 
 
 def test_parse_top_page_raises_parse_error_when_no_items_found():
@@ -102,6 +156,37 @@ def test_parse_top_page_raises_parse_error_when_no_items_found():
 
     with pytest.raises(ParseError):
         collector.parse(_raw(collector.target_urls[0], "<html><body>no pickup items here</body></html>"))
+
+
+def test_parse_top_page_against_raw_html_fixture():
+    """本番ConoHa VPSで実際に取得した生HTML(raw_1kuji_top.html)そのものに対する検証。
+    Fixtureベースのテキストパターンマッチでは「PICK UP ITEMを1件も抽出できませんでした」で
+    失敗していたが、CSSセレクタベースの実装により実際のPICK UP ITEM 15件が
+    正しく抽出できることを確認する。"""
+    collector = IchibanKujiCollector()
+    html = RAW_HTML_FIXTURE_PATH.read_text(encoding="utf-8")
+
+    items = collector.parse(_raw(collector.target_urls[0], html))
+
+    assert len(items) == 15
+
+    cutie = next(i for i in items if i.product_url.endswith("cutiestreet"))
+    assert cutie.raw_title == "一番くじ CUTIE STREET くじを手にする戦いなのです！"
+    assert cutie.extra["fulfillment_type"] == FulfillmentType.BOTH
+    assert cutie.extra["store_release_at"] == datetime(2026, 8, 4, tzinfo=JST)
+    assert cutie.extra["online_release_at"] == datetime(2026, 8, 4, 17, 0, tzinfo=JST)
+
+    onep104 = next(i for i in items if i.product_url.endswith("onep104"))
+    assert onep104.extra["fulfillment_type"] == FulfillmentType.STORE_PICKUP
+    assert onep104.extra["store_release_at"] == datetime(2026, 8, 8, tzinfo=JST)
+    assert onep104.extra["online_release_at"] is None
+
+    petitcure = next(i for i in items if i.product_url.endswith("petitcure"))
+    assert petitcure.extra["fulfillment_type"] == FulfillmentType.ONLINE_SHIPPING
+    assert petitcure.extra["store_release_at"] is None
+    assert petitcure.extra["online_release_at"] == datetime(2026, 6, 24, 17, 0, tzinfo=JST)
+
+    assert all(item.product_url.startswith("https://1kuji.com/products/") for item in items)
 
 
 def test_parse_bandaispirits_detail_handles_non_standard_free_distribution_price():
@@ -179,7 +264,7 @@ async def test_run_end_to_end_against_top_page_fixture_pattern(monkeypatch):
 
     result = await collector.run()
 
-    assert result.success_count == 3
+    assert result.success_count == 4
     assert result.error_count == 0
 
 

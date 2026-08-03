@@ -5,21 +5,30 @@
 - 検索エンドポイント: https://www.suruga-ya.jp/kaitori/search_buy
   (category, search_word, restrict[]クエリパラメータで絞り込み可能)
 
-【検証状況に関する重要な注意】
-このモジュールのparse_observations()は、実際の生HTMLではなくMarkdown変換済み
-テキストのFixture(tests/fixtures/html/suruga_ya_kaitori_search_20260803.md)を
-もとに実装した、テキストパターンベース(正規表現)の抽出ロジックである。
-Fixtureが「markdownのパイプテーブル」として表現されていることから、実サイトも
-<table><tr>構造である可能性が高いと推測して`tr`要素を行の単位として扱っているが、
-実際のクラス名・DOM構造そのものへの検証は未実施。本番のConoHa VPS環境で実際に
-fetch()した生HTMLに対して再検証・調整が必要
-(app/collectors/sources/ichiban_kuji.py と同様の注意点)。
+【検証状況(2026-08-03、本番ConoHa VPSでの実データ検証により更新)】
+本番VPSで実際に取得した生HTML(tests/fixtures/raw_html/raw_suruga_ya_search.html)で
+動作検証済み。`<table><tr>`構造である推測自体は正しかったが、以下2点が実データと
+不一致だったため修正した(前回報告済みの`_find_detail_anchor()`関連バグの原因もこれ):
+- 商品詳細ページへのリンク(`href`)は`https://www.suruga-ya.jp/kaitori/kaitori_detail/
+  {管理番号}`という絶対URLではなく、`/kaitori/kaitori_detail/{管理番号}`という
+  相対パスだった。`DETAIL_URL_PATTERN`がこの相対パスにマッチせず、行内の候補アンカーが
+  1件も見つからないまま全行がスキップされ「買取価格を1件も抽出できませんでした」で
+  失敗していた。
+- `<a>`要素の一部(全選択チェックボックス用のリンク等)は`href=""`のような空文字列の
+  属性を持つが、selectolaxはこれを`None`として返すことがあり、
+  `a.attributes.get("href", "")`では拾いきれず`DETAIL_URL_PATTERN.match(None)`で
+  `TypeError`になっていた。`or ""`で明示的にNoneを吸収するよう修正した。
+価格・JANコード・鑑定品価格の併記・[価格上昇中]タグの抽出パターンは実データでも
+そのまま機能することを確認済み(タグはfont/strongタグで装飾されているが
+`row.text()`でフラット化した時点では従来通り文字列として現れるため無変更)。
+ただし鑑定品価格(【PSA/GEM MT 10】等)については、今回取得した実HTMLに該当商品が
+含まれていなかったため実データでの動作確認はできていない(要検証)。
 """
 
 import re
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
-from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.parse import parse_qs, urlencode, urljoin, urlparse
 
 import httpx
 from selectolax.parser import HTMLParser
@@ -29,6 +38,7 @@ from app.collectors.markets.base import MarketCollector, MarketDataType, MarketO
 from app.core.time import JST
 
 SEARCH_URL = "https://www.suruga-ya.jp/kaitori/search_buy"
+BASE_URL = "https://www.suruga-ya.jp"
 
 # CLAUDE.md 1.3で確認済みのカテゴリID
 CATEGORY_HOBBY_ALL = "501"
@@ -37,7 +47,9 @@ CATEGORY_PLASTIC_MODELS = "50104"
 CATEGORY_FIGURES = "50102"
 CATEGORY_TRADING_FIGURES = "50103"
 
-DETAIL_URL_PATTERN = re.compile(r"https://www\.suruga-ya\.jp/kaitori/kaitori_detail/(?P<code>[A-Za-z0-9]+)")
+# 実データ確認済み(raw_suruga_ya_search.html): hrefは絶対URLではなく
+# "/kaitori/kaitori_detail/{code}"という相対パス。念のため絶対URL表記も許容する。
+DETAIL_URL_PATTERN = re.compile(r"(?:https://www\.suruga-ya\.jp)?/kaitori/kaitori_detail/(?P<code>[A-Za-z0-9]+)")
 # Fixture(suruga_ya_kaitori_search_20260803.md)注記5。
 # suruga_ya_jan_confirmation_20260803.md注記3で、管理番号には"GU"+数字だけでなく
 # 数字のみの形式(雑貨・小物カテゴリ、例:"608000898")もあることが確認されている。
@@ -124,7 +136,10 @@ class SurugaYaCollector(MarketCollector):
             if detail_anchor is None:
                 continue  # ヘッダ行など、商品詳細リンクを持たない行はスキップ
 
-            detail_url = detail_anchor.attributes.get("href", "")
+            href = detail_anchor.attributes.get("href") or ""
+            # 実データ確認済み(raw_suruga_ya_search.html): hrefは相対パスのため、
+            # 絶対URLに変換してsource_url等に保持する。
+            detail_url = urljoin(BASE_URL, href)
             title = detail_anchor.text(strip=True)
             row_text = row.text(deep=True, separator="\n")
 
@@ -216,7 +231,7 @@ class SurugaYaCollector(MarketCollector):
         (=タイトルリンクである)ものを優先して返す。Fixture注記1: タイトル列のリンクテキストは
         `型番[レアリティ]：カード名`であり、行末の「詳細」リンクと区別する必要がある。
         """
-        candidates = [a for a in row.css("a") if DETAIL_URL_PATTERN.match(a.attributes.get("href", ""))]
+        candidates = [a for a in row.css("a") if DETAIL_URL_PATTERN.match(a.attributes.get("href") or "")]
         if not candidates:
             return None
         for anchor in candidates:

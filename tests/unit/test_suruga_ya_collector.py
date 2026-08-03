@@ -1,19 +1,26 @@
 """SurugaYaCollectorのparse_observations()テスト。
 
-tests/fixtures/html/suruga_ya_kaitori_search_20260803.md はMarkdown変換済みの
-パイプテーブルであり、実際のHTML(<table><tr><td>)そのものではない。Fixtureが
-表形式で出力されていることから実サイトも<table>構造である可能性が高いと推測して
-最小限のHTMLを再構成しテストしている。実サイトのDOM構造そのものへの検証ではない点に
-注意(app/collectors/markets/suruga_ya.py のモジュールdocstring参照)。
+以下のテストはtests/fixtures/html/suruga_ya_kaitori_search_20260803.md
+(Markdown変換済みのパイプテーブル)をもとに、実サイトも<table>構造である可能性が
+高いと推測して最小限のHTMLを再構成したものである。本番ConoHa VPSで実際に取得した
+生HTML(tests/fixtures/raw_html/raw_suruga_ya_search.html)による検証の結果、
+<table><tr>構造という推測自体は正しかったが、詳細ページへのリンク(href)が絶対URL
+ではなく相対パスだったこと、一部のアンカーがhref=""をNoneとして返すことによる
+TypeErrorが実際に発生することを確認し、app/collectors/markets/suruga_ya.pyを
+修正した(モジュールdocstring参照)。raw_suruga_ya_search.htmlそのものを使った検証は
+test_parse_observations_against_raw_html_fixtureで行う。
 """
 
 from datetime import date, datetime
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
 from app.collectors.base import ParseError, RawFetchResult
 from app.collectors.markets.suruga_ya import JST, SurugaYaCollector
+
+RAW_HTML_FIXTURE_PATH = Path(__file__).parent.parent / "fixtures" / "raw_html" / "raw_suruga_ya_search.html"
 
 HEADER_ROW = """
 <tr>
@@ -239,3 +246,95 @@ def test_parse_observations_supports_both_management_number_formats_in_one_call(
 # 依存しているため、アンカーが見つかった時点でcode_matchも必ず成功し、
 # 「URL由来の抽出が失敗した場合」という前提そのものが到達不能(=テスト不可能な死んだコード)
 # になるため、app/collectors/markets/suruga_ya.py側で意図的に実装を見送っている。
+
+
+# --- 本番VPSでの実データ検証(raw_suruga_ya_search.html)により判明した問題への対応 ---
+
+# 実データ確認済み: 詳細ページへのリンクは絶対URLではなく相対パス
+# "/kaitori/kaitori_detail/{管理番号}"。
+RELATIVE_HREF_HTML = f"""
+<html><body><table>
+{HEADER_ROW}
+<tr>
+<td></td><td><img src="a.jpg"></td>
+<td>フィギュア <br>
+<a href="/kaitori/kaitori_detail/602038446">一番くじ ワンピースメモリーズ C賞 エースフィギュア</a></td>
+<td>2012/11/10 4983164683417 602038446</td>
+<td>32,000円</td>
+<td><a href="/kaitori/kaitori_detail/602038446"><img src="/ansinSearch/syousai.gif"></a></td>
+</tr>
+</table></body></html>
+"""
+
+# 実データ確認済み: 全選択チェックボックス用のリンク等、href=""(selectolaxはNoneとして
+# 返すことがある)の<a>が同じ行に混在するケース。DETAIL_URL_PATTERN.match(None)で
+# TypeErrorになっていたバグの再現。
+HREF_NONE_HTML = f"""
+<html><body><table>
+{HEADER_ROW}
+<tr>
+<td><a href="" onclick="chBxOn(); return false">全てをチェックする</a></td>
+<td><img src="a.jpg"></td>
+<td>フィギュア <br>
+<a href="/kaitori/kaitori_detail/602038446">一番くじ ワンピースメモリーズ C賞 エースフィギュア</a></td>
+<td>2012/11/10 602038446</td>
+<td>32,000円</td>
+<td><a href="/kaitori/kaitori_detail/602038446">詳細</a></td>
+</tr>
+</table></body></html>
+"""
+
+
+def test_parse_observations_supports_relative_detail_url():
+    """実データ確認済み(raw_suruga_ya_search.html): hrefが相対パスでも抽出でき、
+    source_urlは絶対URLに変換されること。"""
+    collector = SurugaYaCollector()
+
+    observation = collector.parse_observations(_raw(_search_url(""), RELATIVE_HREF_HTML))[0]
+
+    assert observation.extra["management_number"] == "602038446"
+    assert observation.extra["jan"] == "4983164683417"
+    assert observation.source_url == "https://www.suruga-ya.jp/kaitori/kaitori_detail/602038446"
+
+
+def test_parse_observations_does_not_crash_on_anchor_with_none_href():
+    """実データ確認済み(raw_suruga_ya_search.html): 全選択チェックボックス用のリンク等、
+    hrefがNoneとして返るアンカーが同じ行に存在してもTypeErrorにならないこと
+    (前回報告済みのバグ)。"""
+    collector = SurugaYaCollector()
+
+    observations = collector.parse_observations(_raw(_search_url(""), HREF_NONE_HTML))
+
+    assert len(observations) == 1
+    assert observations[0].extra["management_number"] == "602038446"
+
+
+def test_parse_observations_against_raw_html_fixture():
+    """本番ConoHa VPSで実際に取得した生HTML(raw_suruga_ya_search.html)そのものに
+    対する検証。相対hrefとNone href混在により修正前は例外が発生していたが、
+    修正後は実際の検索結果20件が正しく抽出できることを確認する。"""
+    collector = SurugaYaCollector()
+    html = RAW_HTML_FIXTURE_PATH.read_text(encoding="utf-8")
+
+    observations = collector.parse_observations(_raw(_search_url(""), html))
+
+    assert len(observations) == 20
+    assert all(o.source_url.startswith("https://www.suruga-ya.jp/kaitori/kaitori_detail/") for o in observations)
+
+    # JANコードと管理番号の両方が取れる実データの1件
+    jan_item = next(o for o in observations if o.extra["management_number"] == "604075105")
+    assert jan_item.extra["jan"] == "4573102677556"
+    assert jan_item.amount == Decimal("800")
+
+    # [価格上昇中]タグが実際に付いている1件
+    rising_item = next(o for o in observations if o.extra["management_number"] == "602318430")
+    assert rising_item.extra["trend"] == "price_rising"
+
+    # メールにてお見積(amount=None)の1件
+    quote_item = next(o for o in observations if o.extra["management_number"] == "620009877")
+    assert quote_item.amount is None
+    assert quote_item.confidence == "D"
+    assert quote_item.extra["quote_required"] is True
+
+    # 鑑定品価格(GRADED_PRICE_PATTERN)については、このFixtureには該当商品が
+    # 含まれていなかったため実データでの検証はできていない(要検証)。

@@ -1,15 +1,19 @@
 """PokemonCenterOnlineCollectorのparse()テスト。
 
-tests/fixtures/html/pokemon_center_online_product_20260803.md はMarkdown変換済み
-テキストであり、CSSセレクタの検証には使えないため、Fixtureで観察されたテキスト
-パターン(h1タイトル、ステータスラベル、「各種期間」内のラベル+日時の並び)を再現した
-最小限のHTMLに対してparse()をテストする。実サイトの生HTML構造そのものに対する
-検証ではない点に注意(app/collectors/sources/pokemon_center_online.py のモジュール
-docstring参照)。
+以下のテストはtests/fixtures/html/pokemon_center_online_product_20260803.md
+(Markdown変換済みテキスト)で観察されたテキストパターン(h1タイトル、ステータス
+ラベル、「各種期間」内のラベル+日時の並び)を再現した最小限のHTMLに対して
+parse()をテストするものである。本番ConoHa VPSで実際に取得した生HTML
+(tests/fixtures/raw_html/raw_pokemon_center.html)による検証の結果、「各種期間」の
+ラベル+値の並びはそのまま機能したが、価格(金額と「円」「税込」が別要素に分かれている)
+の抽出だけは失敗することが判明し、app/collectors/sources/pokemon_center_online.pyを
+修正した(モジュールdocstring参照)。raw_pokemon_center.htmlそのものを使った検証は
+test_parse_against_raw_html_fixtureで行う。
 """
 
 from datetime import datetime
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
@@ -18,6 +22,7 @@ from app.collectors.sources.pokemon_center_online import JST, PokemonCenterOnlin
 from app.domain.enums import FulfillmentType, RegionSource, SupportedEventType
 
 PRODUCT_URL = "https://www.pokemoncenter-online.com/9900000006082.html"
+RAW_HTML_FIXTURE_PATH = Path(__file__).parent.parent / "fixtures" / "raw_html" / "raw_pokemon_center.html"
 
 # Fixture(pokemon_center_online_product_20260803.md)の該当箇所を、
 # ラベル行+値行の並びを保ったまま最小限のHTMLとして再現したもの。
@@ -184,3 +189,56 @@ async def test_fetch_product_fetches_parses_and_normalizes_by_product_code(monke
 
     assert normalized.product_name.startswith("【抽選販売】")
     assert normalized.parsed.deadline_at == datetime(2025, 8, 19, 16, 59, tzinfo=JST)
+
+
+# --- 本番VPSでの実データ検証(raw_pokemon_center.html)により判明した価格抽出バグへの対応 ---
+
+# 実データ確認済み: 金額の数字("5,800")と単位("円")・税込表記が別要素(入れ子の<small>)に
+# 分かれており、フラット化すると別行になる。修正前はPRICE_PATTERNを1行ずつ検索していたため
+# 一致せずprice=Noneになっていた。
+NESTED_PRICE_ELEMENT_HTML = """
+<html><body>
+<h1>【抽選販売】ネスト価格要素のテスト商品</h1>
+<p class="stock"><span>品切れ</span></p>
+<p class="price default">
+    <span class="txt">5,800<small>円</small></span>
+    <small class="sml">税込</small>
+</p>
+<p>お一人様 1点限り</p>
+<p>・抽選応募受け付け期間</p>
+<p>2025年8月8日(金)16時00分～2025年8月19日(火)16時59分</p>
+</body></html>
+"""
+
+
+def test_parse_extracts_price_when_amount_and_yen_are_in_separate_nested_elements():
+    """実データ確認済み(raw_pokemon_center.html): 金額と「円」「税込」が別要素に
+    分かれていても価格を正しく抽出できること(修正前は price=None になっていたバグ)。"""
+    collector = PokemonCenterOnlineCollector()
+
+    item = collector.parse(_raw(PRODUCT_URL, NESTED_PRICE_ELEMENT_HTML))[0]
+
+    assert item.price == Decimal("5800")
+    assert item.extra["inventory_status"] == "品切れ"
+
+
+def test_parse_against_raw_html_fixture():
+    """本番ConoHa VPSで実際に取得した生HTML(raw_pokemon_center.html)そのものに
+    対する検証。「各種期間」の4フィールド抽出と、修正後の価格抽出の両方が
+    実データで正しく機能することを確認する。"""
+    collector = PokemonCenterOnlineCollector()
+    html = RAW_HTML_FIXTURE_PATH.read_text(encoding="utf-8")
+
+    item = collector.parse(_raw(PRODUCT_URL, html))[0]
+
+    assert item.raw_title == "【抽選販売】ポケモンカードゲーム スカーレット＆バイオレット 拡張パック ブラックボルト BOX拡張パック"
+    assert item.price == Decimal("5800")
+    assert item.event_type == SupportedEventType.LOTTERY
+    assert item.start_at == datetime(2025, 8, 8, 16, 0, tzinfo=JST)
+    assert item.deadline_at == datetime(2025, 8, 19, 16, 59, tzinfo=JST)
+    assert item.announce_at == datetime(2025, 8, 22, 15, 0, tzinfo=JST)
+    assert item.purchase_limit_at == datetime(2025, 8, 26, 16, 59, tzinfo=JST)
+    assert item.extra["delivery_timing_text"] == "9月下旬発送予定"
+    assert item.extra["inventory_status"] == "品切れ"
+    assert item.extra["purchase_limit_count"] == 1
+    assert item.extra["product_code"] == "9900000006082"

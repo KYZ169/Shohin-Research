@@ -7,23 +7,39 @@ CLAUDE.md 1.1 / 8.5, 実装仕様書9章の実測結果に基づく:
 - on-line.1kuji.com: Bot対策により取得不可(確認済み)。本Collectorは絶対にこのドメインへ
   リクエストしない(CLAUDE.mdタスク4着手前チェックリスト)。
 
-【検証状況に関する重要な注意】
-このモジュールのparse()は、実際の生HTMLではなくMarkdown変換済みテキストのFixture
-(tests/fixtures/html/1kuji_com_top_20260803.md,
- tests/fixtures/html/bandaispirits_detail_20260803.md)をもとに実装した、
-テキストパターンベース(正規表現・行単位マッチ)の抽出ロジックである。
-実サイトの生HTMLタグ構造(class名等)に対しては未検証のため、本番のConoHa VPS環境
-(このサンドボックスと異なりネットワーク制限がない想定)で実際にfetch()した生HTMLに対して
-再検証・調整が必要。特に画像URLの抽出は根拠となる実データが乏しいため暫定実装であり、
-要検証。
+【検証状況(2026-08-03、本番ConoHa VPSでの実データ検証により更新)】
+トップページ(_parse_top_page/PICK UP ITEM抽出)は、本番VPSで実際に取得した生HTML
+(tests/fixtures/raw_html/raw_1kuji_top.html)で動作検証済み。当初のMarkdown変換済み
+テキストFixture(tests/fixtures/html/1kuji_com_top_20260803.md)を前提にした
+テキスト連結パターンマッチでは実際のDOM構造と一致せず
+「PICK UP ITEMを1件も抽出できませんでした」で失敗することが確認されたため、
+実HTMLの構造(`section.pickupCol` > `div.swiper-slide` > `a` +
+`div.txtCol` > `p.status`/`p.date`/`p.itemName`)に基づくCSSセレクタベースの
+実装に書き直した(実装仕様書9章のCollector基底クラス設計に沿う形)。主な相違点:
+- 商品詳細ページへのリンクは絶対URLではなく相対パス(`/products/{slug}`)。
+  `urljoin()`で絶対URLに変換する。
+- 「店頭販売」「オンライン販売」というラベルは日付テキストと同じ要素内に連結されておらず、
+  `<p class="status shop">`/`<p class="status online">`という別要素になっている。
+  日付側の`<p class="date">`には「2026年08月08日(土)より発売予定」のように
+  ラベル文言を含まない形で記載されている(「より発売予定」と「より順次発売予定」の
+  両方の表記が実在することを確認済み)。
+- 商品名は`<p class="itemName">`に独立して格納されており、日付テキストを正規表現で
+  除去して切り出す必要がなくなった。
+
+bandaispirits.co.jpの商品詳細ページ(_parse_bandaispirits_detail)は、本番VPSでの
+生HTML取得がまだ行われていないため、引き続きMarkdown変換済みテキストのFixture
+(tests/fixtures/html/bandaispirits_detail_20260803.md)をもとにしたテキスト
+パターンベースの抽出ロジックのままであり、実サイトの生HTML構造に対しては未検証
+(トップページと同様の問題が起きる可能性がある。要検証)。
 """
 
 import re
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
+from urllib.parse import urljoin
 
 import httpx
-from selectolax.parser import HTMLParser
+from selectolax.parser import HTMLParser, Node
 
 from app.collectors.base import (
     FetchError,
@@ -41,57 +57,74 @@ BANDAISPIRITS_DETAIL_URL_TEMPLATE = (
     "https://www.bandaispirits.co.jp/products/search/detail.php?prd_id={prd_id}&grp_id=9999"
 )
 
-PRODUCT_URL_PATTERN = re.compile(r"^https://1kuji\.com/products/[\w-]+$")
+# 実データ確認済み(raw_1kuji_top.html): 商品詳細へのリンクは相対パス「/products/{slug}」。
+PRODUCT_PATH_PATTERN = re.compile(r"^/products/[\w-]+$")
 
-# 実装仕様書9章のSTORE_PATTERN/ONLINE_PATTERNのアプローチを踏襲しつつ、
-# Fixture実データ(1kuji_com_top_20260803.md 注記1)に合わせて末尾の定型句まで含めて
-# マッチさせる。日時部分を除去した残りを商品名として切り出すために必要な拡張。
+# 実データ確認済み(raw_1kuji_top.html): 日付テキスト自体には「店頭販売」等のラベルを
+# 含まない(ラベルは別要素のp.status)。「より発売予定」「より順次発売予定」の両方の
+# 表記を確認済みのため「順次」は任意とする。
 STORE_DATE_PATTERN = re.compile(
-    r"店頭販売(?P<y>\d{4})年(?P<mo>\d{2})月(?P<d>\d{2})日(?:\([^)]*\))?より順次発売予定"
+    r"(?P<y>\d{4})年(?P<mo>\d{2})月(?P<d>\d{2})日(?:\([^)]*\))?より(?:順次)?発売予定"
 )
 ONLINE_DATE_PATTERN = re.compile(
-    r"オンライン販売(?P<y>\d{4})年(?P<mo>\d{2})月(?P<d>\d{2})日"
+    r"(?P<y>\d{4})年(?P<mo>\d{2})月(?P<d>\d{2})日"
     r"\((?P<wd>[^)]*)\)(?P<h>\d{2}):(?P<mi>\d{2})より販売開始予定"
 )
 
-# bandaispirits_detail_20260803.md 注記2の推測パターン
+# bandaispirits_detail_20260803.md 注記2の推測パターン(未検証、モジュールdocstring参照)
 BANDAISPIRITS_PRICE_PATTERN = re.compile(r"1回(?P<amount>[\d,]+)円\(税(?P<tax>\d+)％込\)")
 # 注記4: 期間表記(〜MM月DD日)のケースもあるが、開始日のみを採用する(TODO参照)
 BANDAISPIRITS_DATE_PATTERN = re.compile(r"(?P<y>\d{4})年(?P<mo>\d{2})月(?P<d>\d{2})日")
 
 
-def _parse_pickup_item_text(text: str) -> tuple[date | None, datetime | None, str]:
-    """1kuji.comのPICK UP ITEMリンクテキストから
+def _parse_pickup_slide(slide: Node) -> tuple[date | None, datetime | None, str | None]:
+    """PICK UP ITEMの1商品(`div.swiper-slide`)から
     (店頭販売日, オンライン販売日時, 商品名)を抽出する。
 
-    Fixtureでは「店頭販売YYYY年MM月DD日(曜)より順次発売予定オンライン販売YYYY年MM月DD日
-    (曜)HH:MMより販売開始予定商品名」という区切り文字の無い連結テキストになっているため、
-    日時部分の正規表現マッチを除去した残りを商品名として扱う。
+    実データ確認済み(raw_1kuji_top.html): `div.txtCol`配下に
+    `<p class="status shop">店頭販売</p><p class="date">...</p>`
+    `<p class="status online">オンライン販売</p><p class="date">...</p>`
+    `<p class="itemName">商品名</p>`
+    の順でラベルと値のp要素が並ぶ(店頭/オンラインどちらか一方のみの商品も実在する:
+    店頭のみ=onep104、オンラインのみ=petitcure、両方=それ以外の大半)。
+    直前に出現したp.statusのクラス(shop/online)を見て、続くp.dateをどちらの
+    日付として扱うか判定する。
     """
-    store_match = STORE_DATE_PATTERN.search(text)
-    online_match = ONLINE_DATE_PATTERN.search(text)
+    txt_col = slide.css_first(".txtCol")
+    if txt_col is None:
+        return None, None, None
 
     store_date: date | None = None
-    if store_match:
-        store_date = date(int(store_match["y"]), int(store_match["mo"]), int(store_match["d"]))
-
     online_dt: datetime | None = None
-    if online_match:
-        online_dt = datetime(
-            int(online_match["y"]),
-            int(online_match["mo"]),
-            int(online_match["d"]),
-            int(online_match["h"]),
-            int(online_match["mi"]),
-            tzinfo=JST,
-        )
+    title: str | None = None
+    current_status: str | None = None
 
-    remaining = text
-    matches = [m for m in (store_match, online_match) if m is not None]
-    for m in sorted(matches, key=lambda m: m.start(), reverse=True):
-        remaining = remaining[: m.start()] + remaining[m.end() :]
+    for p in txt_col.css("p"):
+        classes = (p.attributes.get("class") or "").split()
+        text = p.text(strip=True)
 
-    return store_date, online_dt, remaining.strip()
+        if "itemName" in classes:
+            title = text
+        elif "status" in classes:
+            if "shop" in classes:
+                current_status = "shop"
+            elif "online" in classes:
+                current_status = "online"
+            else:
+                current_status = None
+        elif "date" in classes:
+            if current_status == "shop":
+                m = STORE_DATE_PATTERN.search(text)
+                if m:
+                    store_date = date(int(m["y"]), int(m["mo"]), int(m["d"]))
+            elif current_status == "online":
+                m = ONLINE_DATE_PATTERN.search(text)
+                if m:
+                    online_dt = datetime(
+                        int(m["y"]), int(m["mo"]), int(m["d"]), int(m["h"]), int(m["mi"]), tzinfo=JST
+                    )
+
+    return store_date, online_dt, title
 
 
 def _fulfillment_type_for(store_date: date | None, online_dt: datetime | None) -> FulfillmentType:
@@ -158,16 +191,23 @@ class IchibanKujiCollector(SourceCollector):
         tree = HTMLParser(raw.html)
         items: list[ParsedItem] = []
 
-        for anchor in tree.css("a"):
-            href = anchor.attributes.get("href") or ""
-            if not PRODUCT_URL_PATTERN.match(href):
+        # 実データ確認済み(raw_1kuji_top.html): PICK UP ITEMは
+        # section.pickupCol配下のdiv.swiper-slideに限定される。ここでCSSセレクタで
+        # 範囲を絞ることで、ページ全体のラインナップ一覧(数百件規模)を誤って
+        # 拾ってしまうことを構造的に防ぐ。
+        for slide in tree.css("section.pickupCol div.swiper-slide"):
+            anchor = slide.css_first("a")
+            if anchor is None:
                 continue
 
-            text = anchor.text(deep=True, separator="")
-            store_date, online_dt, product_name = _parse_pickup_item_text(text)
+            href = anchor.attributes.get("href") or ""
+            if not PRODUCT_PATH_PATTERN.match(href):
+                continue
+            product_url = urljoin(ICHIBAN_KUJI_TOP_URL, href)
 
-            if store_date is None and online_dt is None:
-                # PICK UP ITEM以外(画像のみのラインナップセクション等)は対象外
+            store_date, online_dt, product_name = _parse_pickup_slide(slide)
+            if not product_name:
+                # p.itemNameが無い(構造想定外の)slideはスキップする
                 continue
 
             fulfillment_type = _fulfillment_type_for(store_date, online_dt)
@@ -177,20 +217,28 @@ class IchibanKujiCollector(SourceCollector):
                 else None
             )
 
+            image_urls: list[str] = []
+            img = anchor.css_first("img")
+            if img is not None:
+                src = img.attributes.get("src")
+                if src:
+                    # 実データ確認済み(raw_1kuji_top.html): 商品画像は同じ<a>内の<img src>。
+                    image_urls.append(src)
+
             items.append(
                 ParsedItem(
                     raw_title=product_name,
                     # トップページのPICK UP ITEMには価格情報が無い(Fixture注記参照)。
                     # 価格はbandaispirits.co.jpの詳細ページ等で別途補完する運用とする。
                     price=None,
-                    image_urls=[],  # 実データ未確認のためTODO(モジュールdocstring参照)
+                    image_urls=image_urls,
                     event_type=SupportedEventType.LOTTERY,
                     start_at=store_release_at or online_dt,
                     deadline_at=None,  # CLAUDE.md 1.1: on-line.1kuji.comが取得不可なため常にnull
                     announce_at=None,
                     purchase_limit_at=None,
-                    apply_url=href,  # 実装仕様書9章: 組み立てられない場合はproduct_urlで代替
-                    product_url=href,
+                    apply_url=product_url,  # 実装仕様書9章: 組み立てられない場合はproduct_urlで代替
+                    product_url=product_url,
                     shop_name=None,
                     extra={
                         "store_release_at": store_release_at,
