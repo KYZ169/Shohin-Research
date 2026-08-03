@@ -123,7 +123,7 @@
 | 3 | SourceCollector基底クラス実装 | 実装仕様書 Prompt 3・9章 | ✅ 完了 |
 | 4 | 一番くじCollector実装（`1kuji.com`+`bandaispirits.co.jp`、`on-line.1kuji.com`除外） | 実装仕様書9章の正規表現パターン | ✅ 完了（Fixtureベース、生HTML未検証） |
 | 5 | プレミアムバンダイCollector実装 | 実装仕様書 Prompt 3拡張 | ⏸ 保留（`deadline_itemlist`はJS依存(SPA)のため取得不可と判明。個別商品ページ(cp932対応)に方針変更、Fixture未整備） |
-| 6 | 駿河屋Market Collector実装 | 実装仕様書10章・Prompt 4 | ✅ 完了（Fixtureベース、生HTML未検証。JANコード抽出はタスク15で追加対応） |
+| 6 | 駿河屋Market Collector実装 | 実装仕様書10章・Prompt 4 | ✅ 完了（Fixtureベース、生HTML未検証。JANコード抽出はタスク15で追加対応済み） |
 | 7 | 地域解決ロジック実装（`resolve_region()`、`fulfillment_type`フィルタ） | 実装仕様書1.3節、4.3節 | ✅ 完了 |
 | 8 | 商品照合スコアリング実装（JAN一致・商品名類似度・単位不一致ペナルティ等） | 技術分析レポート11章 | ✅ 完了（単位不一致は減点ではなく89点上限キャップとして実装、None属性は不一致判定しない） |
 | 9 | Profit Engine実装（未確定コスト分離ロジック必須） | 実装仕様書2章・Prompt 5 | ✅ 完了（未確定コストは金額計算から完全除外、確認済み） |
@@ -131,8 +131,8 @@
 | 11 | Discord通知実装（締切不明時フォールバック含む） | 実装仕様書4章・Prompt 7 | ✅ 完了（商品照合match_statusの可視化を追加修正済み。地域の要確認とは別フィールドで表示） |
 | 12 | Celery Beatでの定期実行結線 | — | ✅ 完了（収集結果のDB反映・Opportunity生成は含まず、Collector起動のみ。詳細はタスク13で対応） |
 | 13 | E2Eパイプライン実装（収集→商品照合→Profit Engine→Opportunity→dedupe→Embed組み立て） | — | ✅ 完了（Fixtureベースの統合テストのみ、実サイトでの動作は未検証） |
-| 14 | ポケモンセンターオンラインCollector実装 | 本ファイル1.4節のFixture・正規表現パターン | 🔜 Fixture(`pokemon_center_online_product_20260803.md`)未着（再アップロード待ち） |
-| 15 | 駿河屋CollectorへJANコード抽出を追加 | 本ファイル1.3節のFixture(`suruga_ya_jan_confirmation_20260803.md`) | 🔜 着手中 |
+| 14 | ポケモンセンターオンラインCollector実装 | 本ファイル1.4節のFixture・正規表現パターン | ✅ 完了（Fixtureベース、生HTML未検証。各種期間4フィールド抽出済み） |
+| 15 | 駿河屋CollectorへJANコード抽出を追加 | 本ファイル1.3節のFixture(`suruga_ya_jan_confirmation_20260803.md`) | ✅ 完了 |
 | 16 | Discord Bot Interaction実装（応募済み/ウォッチ/非表示ボタン） | 実装仕様書14章 | ✅ 完了（discord.pyのゲートウェイ実接続のみ未検証） |
 
 **タスク7・8の分離について**: 当初「タスク7 = Product Matcher実装（地域解決ロジック含む）」と
@@ -159,7 +159,7 @@
 - ~~ポケモンセンターオンラインの実データ確認~~ → **確認済み(1.4節)。締切・当選発表・購入期限すべて取得可能、優先度を最上位に格上げ**
 - ~~駿河屋の商品詳細ページのJAN/型番の取得可否~~ → **確認済み(1.3節・Fixture`suruga_ya_jan_confirmation_20260803.md`)。JANコードは一覧ページの時点で取得可能なケースがある（ただし全商品ではない、nullable前提の設計のままで良い）。管理番号の形式が`GU`+数字／数字のみの2種類確認、文字列型で保持すること**
 - プレミアムバンダイの個別商品ページ（`p-bandai.jp/item/item-{ID}/`）のFixture再取得（cp932の正しいデコードが必要。`deadline_itemlist`はJS依存(SPA)のため断念済み、1.2節参照）
-- ポケモンセンターオンラインの商品一覧ページ（カテゴリ別・新着別）のURL・構造確認（個別ページのURLパターンから商品コードを収集する巡回設計に必要）
+- ポケモンセンターオンラインの商品一覧ページ（カテゴリ別・新着別）のURL・構造確認（個別ページのURLパターンから商品コードを収集する巡回設計に必要、タスク14の報告参照）
 - ポケモンセンターオンラインの商品コードがJANコードと一致するかの確認
 - Discord Bot側のInteraction実装（実装済み。discord.pyのゲートウェイ実接続のみ未検証、タスク16の報告参照）
 
