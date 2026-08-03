@@ -7,6 +7,8 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg2://resale_radar:resale_radar@localhost:5432/resale_radar"
     redis_url: str = "redis://localhost:6379/0"
     discord_bot_token: str = ""
+    # 技術分析レポート15章: 初期は単一ユーザー前提のAPIキー認証(Bearerトークン)
+    api_key: str = ""
 
 
 settings = Settings()

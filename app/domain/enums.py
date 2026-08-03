@@ -75,3 +75,11 @@ class ProfitScenario(str, Enum):
     PESSIMISTIC = "pessimistic"
     STANDARD = "standard"
     OPTIMISTIC = "optimistic"
+
+
+class LotteryEntryResult(str, Enum):
+    """技術分析レポート8.1のlottery_entries.result(pending/won/lost)。"""
+
+    PENDING = "pending"
+    WON = "won"
+    LOST = "lost"
