@@ -67,3 +67,11 @@ class MatchStatus(str, Enum):
     NEEDS_REVIEW = "needs_review"  # 要確認
     DIFFERENT_PRODUCT = "different_product"  # 別商品
     MANUALLY_CONFIRMED = "manually_confirmed"  # 手動確定済み
+
+
+class ProfitScenario(str, Enum):
+    """技術分析レポート12.4: 悲観(85%)/標準(100%)/楽観(110%)の3シナリオ。"""
+
+    PESSIMISTIC = "pessimistic"
+    STANDARD = "standard"
+    OPTIMISTIC = "optimistic"
