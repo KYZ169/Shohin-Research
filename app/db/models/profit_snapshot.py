@@ -16,8 +16,12 @@ class ProfitSnapshot(Base):
 
     技術分析8.1では"event_id or product_id"だが、本実装ではrelease_events基準の
     計算のみ扱うためevent_id必須とする。channel_id(sales_channelsへのFK)は
-    sales_channelsテーブルが未実装のため、暫定的にchannel_name(文字列)で保持する
-    (TODO: sales_channels実装時にFKへ置き換える)。
+    sales_channelsテーブルが未実装のため、暫定的にchannel_name(文字列)で保持する。
+
+    TODO(sales_channels実装時に対応): channel_nameをFK(channel_id)に置き換える。
+    文字列のまま放置すると表記ゆれ(例: "suruga_ya"と"駿河屋"のような別名)で
+    同一チャネルが別チャネル扱いになるリスクがあるため、sales_channels実装と
+    同時に必ずFK化すること(2026-08-03 タスク9レビュー時にユーザー指摘)。
 
     1イベントにつきscenario(pessimistic/standard/optimistic)ごとに最大3レコード。
     再計算のたびに新規追加する(物理削除・直近保持は運用側のクリーンアップジョブで
