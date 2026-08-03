@@ -6,3 +6,6 @@ venv/
 .pytest_cache/
 *.egg-info/
 .DS_Store
+
+# scripts/verify_collectors.pyの検証結果(本番実データを含むためコミットしない)
+verify_result*.json
