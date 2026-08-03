@@ -25,6 +25,7 @@ def _make_release_event(db_session) -> ReleaseEvent:
         shop_id=shop.id,
         source_id=source.id,
         event_type=SupportedEventType.LOTTERY,
+        product_url="https://example.com/products/test",
     )
     db_session.add(event)
     db_session.flush()

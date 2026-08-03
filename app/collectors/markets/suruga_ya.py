@@ -108,16 +108,19 @@ class SurugaYaCollector(MarketCollector):
                 continue  # ヘッダ行など、商品詳細リンクを持たない行はスキップ
 
             detail_url = detail_anchor.attributes.get("href", "")
+            title = detail_anchor.text(strip=True)
             row_text = row.text(deep=True, separator="\n")
 
-            observations.append(self._build_observation(product_ref, detail_url, row_text))
+            observations.append(self._build_observation(product_ref, detail_url, title, row_text))
 
         if not observations:
             raise ParseError(f"{raw.url}: 買取価格を1件も抽出できませんでした(構造変更の可能性)")
 
         return observations
 
-    def _build_observation(self, product_ref: str, detail_url: str, row_text: str) -> MarketObservation:
+    def _build_observation(
+        self, product_ref: str, detail_url: str, title: str, row_text: str
+    ) -> MarketObservation:
         code_match = DETAIL_URL_PATTERN.match(detail_url)
         management_number = code_match["code"] if code_match else None
         if management_number is None:
@@ -130,6 +133,7 @@ class SurugaYaCollector(MarketCollector):
             release_date = date(int(date_match["y"]), int(date_match["mo"]), int(date_match["d"]))
 
         extra: dict = {
+            "title": title,  # Product Matcher(app/matcher/product_matcher.py)での商品名照合に使う
             "management_number": management_number,
             "detail_url": detail_url,
             "release_date": release_date,

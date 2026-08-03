@@ -80,6 +80,7 @@ def test_parse_observations_extracts_plain_price():
     assert loch.confidence == "B"
     assert loch.extra["release_date"] == date(2026, 2, 28)
     assert loch.source_url == "https://www.suruga-ya.jp/kaitori/kaitori_detail/GU630031"
+    assert loch.extra["title"] == "LOCH-JP003[UR]：黒魔導のカーテン"
 
 
 def test_parse_observations_header_row_is_skipped():

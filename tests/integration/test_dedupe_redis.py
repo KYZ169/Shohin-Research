@@ -82,3 +82,34 @@ def test_unconfirmed_cost_becoming_confirmed_is_detected(redis_client, event_id)
         assert result.newly_resolved_cost_items == ["SHIPPING_UNKNOWN"]
     finally:
         redis_client.delete(f"notification:{event_id}")
+
+
+def test_previous_displayed_profit_round_trips_through_redis(redis_client, event_id):
+    """タスク13で追加: 差分通知(「想定利益: ¥1,350 → ¥950」)の実現に必要な
+    前回displayed_profitの記録・取得を検証する。"""
+    first_key = build_dedupe_key(
+        event_id, "shop-1", Decimal("1350"), deadline_at=None, excluded_cost_items=["SHIPPING_UNKNOWN"]
+    )
+    second_key = build_dedupe_key(event_id, "shop-1", Decimal("950"), deadline_at=None, excluded_cost_items=[])
+
+    try:
+        first_result = check_and_update_dedupe_state(
+            redis_client,
+            event_id,
+            first_key,
+            excluded_cost_items=["SHIPPING_UNKNOWN"],
+            displayed_profit=Decimal("1350"),
+        )
+        assert first_result.previous_displayed_profit is None  # 初回は前回値が無い
+
+        second_result = check_and_update_dedupe_state(
+            redis_client,
+            event_id,
+            second_key,
+            excluded_cost_items=[],
+            displayed_profit=Decimal("950"),
+        )
+
+        assert second_result.previous_displayed_profit == Decimal("1350")
+    finally:
+        redis_client.delete(f"notification:{event_id}")

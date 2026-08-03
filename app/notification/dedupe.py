@@ -84,6 +84,7 @@ class DedupeCheckResult:
     decision: DedupeDecision
     dedupe_key: str
     newly_resolved_cost_items: list[str]
+    previous_displayed_profit: Decimal | None = None
 
 
 class SupportsHashOps(Protocol):
@@ -100,9 +101,15 @@ def check_and_update_dedupe_state(
     event_id: str,
     dedupe_key: str,
     excluded_cost_items: list[str],
+    displayed_profit: Decimal | None = None,
 ) -> DedupeCheckResult:
     """実装仕様書4.2: Redisに`notification:{event_id}`として最新のcontent_hashを保存し、
     新しい通知候補が生成されたらhashを比較して新規/更新/変化なしを判定する。
+
+    displayed_profitを渡すと、次回呼び出し時に前回のdisplayed_profitを
+    `previous_displayed_profit`として返せるようになる(実装仕様書4.2の差分通知
+    テンプレート「想定利益: ¥1,350 → ¥950」の実現に必要。タスク13で追加)。
+    省略した場合は前回値を追跡しない(タスク11時点の後方互換性のため任意引数とする)。
 
     redis_clientは`decode_responses=True`で生成されたクライアントを想定する
     (bytesではなくstrでやり取りするため)。
@@ -112,19 +119,27 @@ def check_and_update_dedupe_state(
 
     previous_hash = stored.get("content_hash")
     previous_excluded = json.loads(stored["excluded_cost_items"]) if stored.get("excluded_cost_items") else []
+    previous_displayed_profit = (
+        Decimal(stored["displayed_profit"]) if stored.get("displayed_profit") is not None else None
+    )
 
     decision = classify_dedupe(previous_hash, dedupe_key)
     newly_resolved = resolved_cost_items(previous_excluded, excluded_cost_items)
 
-    redis_client.hset(
-        redis_key,
-        mapping={
-            "content_hash": dedupe_key,
-            "excluded_cost_items": json.dumps(excluded_cost_items),
-        },
-    )
+    mapping = {
+        "content_hash": dedupe_key,
+        "excluded_cost_items": json.dumps(excluded_cost_items),
+    }
+    if displayed_profit is not None:
+        mapping["displayed_profit"] = str(displayed_profit)
+    redis_client.hset(redis_key, mapping=mapping)
 
-    return DedupeCheckResult(decision=decision, dedupe_key=dedupe_key, newly_resolved_cost_items=newly_resolved)
+    return DedupeCheckResult(
+        decision=decision,
+        dedupe_key=dedupe_key,
+        newly_resolved_cost_items=newly_resolved,
+        previous_displayed_profit=previous_displayed_profit,
+    )
 
 
 def build_diff_notification_text(

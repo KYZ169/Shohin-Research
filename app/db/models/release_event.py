@@ -17,6 +17,12 @@ class ReleaseEvent(Base):
     deadline_at はPoC-1実測により取得できないサイトが実在するためnullable運用とする
     (実装仕様書1.3参照)。start_at/announce_at/purchase_limit_at/priceも同様の理由で
     nullableとし、取得できた事実のみを保持する設計方針(CLAUDE.md最重要方針2)に合わせる。
+
+    product_url/apply_urlはタスク13(DB書き込みパイプライン)でDiscord Embed
+    (実装仕様書4.1)組み立てに必要と判明し追加したカラム。技術分析8.1・実装仕様書1.3の
+    いずれのrelease_events定義にも無いが、SourceCollectorのParsedItem.product_url/
+    apply_urlをDBへ永続化する先が無かったための追加(sourcesテーブルと同種の
+    integration gap)。
     """
 
     __tablename__ = "release_events"
@@ -68,5 +74,9 @@ class ReleaseEvent(Base):
     )
     store_release_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     online_release_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # タスク13追加(モデルdocstring参照)
+    product_url: Mapped[str] = mapped_column(String, nullable=False)
+    apply_url: Mapped[str | None] = mapped_column(String, nullable=True)
 
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
