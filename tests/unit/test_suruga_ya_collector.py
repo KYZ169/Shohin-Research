@@ -18,11 +18,12 @@ from pathlib import Path
 import pytest
 
 from app.collectors.base import ParseError, RawFetchResult
-from app.collectors.markets.suruga_ya import CATEGORY_ONE_PIECE_CARD, JST, SurugaYaCollector
+from app.collectors.markets.suruga_ya import CATEGORY_GUNDAM, CATEGORY_ONE_PIECE_CARD, JST, SurugaYaCollector
 
 RAW_HTML_FIXTURE_PATH = Path(__file__).parent.parent / "fixtures" / "raw_html" / "raw_suruga_ya_search.html"
 GRADED_RAW_HTML_FIXTURE_PATH = Path(__file__).parent.parent / "fixtures" / "raw_html" / "raw_suruga_ya_graded.html"
 ONE_PIECE_RAW_HTML_FIXTURE_PATH = Path(__file__).parent.parent / "fixtures" / "raw_html" / "raw_suruga_ya_onepiece.html"
+GUNDAM_RAW_HTML_FIXTURE_PATH = Path(__file__).parent.parent / "fixtures" / "raw_html" / "raw_suruga_ya_gundam.html"
 
 HEADER_ROW = """
 <tr>
@@ -408,3 +409,44 @@ def test_parse_observations_supports_other_genre_category_without_code_change():
     quote_required_items = [o for o in observations if o.extra.get("quote_required")]
     assert len(quote_required_items) == 10
     assert all(o.amount is None and o.confidence == "D" for o in quote_required_items)
+
+
+def test_parse_observations_extracts_model_number_for_gundam_category():
+    """CLAUDE.md 3節「駿河屋Collectorのガンダムカテゴリ対応確認」に対応する検証。
+    category=5010401(ガンダムプラモデル)で実際に取得した生HTML
+    (raw_suruga_ya_gundam.html)には、トレカ系(50108配下)には無かった「型番」が
+    「発売日/型番/JANコード/管理番号」の4要素として独立して含まれる
+    (例: "2026/04/25<br>5072030<br>4573102720306<br>603227273")。
+    MODEL_NUMBER_PATTERNがこの型番を正しく抽出し、JAN/管理番号と混同しないことを
+    実データで確認する。20件中19件は型番ありだが、1件は型番欄自体が空
+    (実データの仕様であり、抽出漏れではない)ため、その1件のみmodel_number=Noneに
+    なることも合わせて確認する。
+    """
+    collector = SurugaYaCollector(category=CATEGORY_GUNDAM)
+    html = GUNDAM_RAW_HTML_FIXTURE_PATH.read_text(encoding="utf-8")
+
+    observations = collector.parse_observations(_raw(_search_url(""), html))
+
+    assert len(observations) == 20
+
+    # 型番・JAN・管理番号がいずれも正しく分離抽出されている代表例
+    # (2026/04/25<br>5072030<br>4573102720306<br>603227273)
+    sample = next(o for o in observations if o.extra["management_number"] == "603227273")
+    assert sample.extra["model_number"] == "5072030"
+    assert sample.extra["jan"] == "4573102720306"
+    assert sample.amount == Decimal("6600")
+
+    with_model = [o for o in observations if o.extra["model_number"] is not None]
+    without_model = [o for o in observations if o.extra["model_number"] is None]
+    assert len(with_model) == 19
+    assert len(without_model) == 1
+    # 型番欄が空の1件でも、JAN・管理番号自体は正しく取れていることを確認する
+    # (型番の有無が他の識別子の抽出に影響しないことの確認)。
+    assert without_model[0].extra["management_number"] == "603230907"
+    assert without_model[0].extra["jan"] == "4580886841455"
+
+    # 型番がJANコード(13桁)や管理番号として誤認されていないことの確認
+    # (MODEL_NUMBER_PATTERNのmodelグループは常にJAN/管理番号と別の値であるべき)。
+    for o in with_model:
+        assert o.extra["model_number"] != o.extra["jan"]
+        assert o.extra["model_number"] != o.extra["management_number"]

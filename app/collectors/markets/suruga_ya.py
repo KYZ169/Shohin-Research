@@ -36,6 +36,23 @@ confidence B/D判定もすべて既存実装のまま正しく機能した。カ
 コンストラクタ引数(`category`)で外部化されているため、ジャンル追加時は
 `CATEGORY_ONE_PIECE_CARD`のような定数を1行追加するだけでよく、パース側の
 コード変更は不要という設計になっていることも確認した。
+
+【検証状況(2026-08-05、ガンダムカテゴリでの型番(型式)確認)】
+category=5010401(ガンダムプラモデル)で取得した実HTML
+(tests/fixtures/raw_html/raw_suruga_ya_gundam.html)には、トレカ系
+(50108配下、上記ワンピースカード検証時点)には無かった「型番」が
+「発売日/型番/JANコード/管理番号」の4要素として独立して含まれる
+(例: "2026/04/25<br>5072030<br>4573102720306<br>603227273")。
+既存のJAN_AND_ID_PATTERN/MANAGEMENT_NUMBER_PATTERNはこの型番を
+JAN/管理番号と誤認していなかった(型番は7桁前後でJANの13桁と衝突せず、
+管理番号は既存通りDETAIL_URL_PATTERN経由でURLから独立抽出しているため)。
+ただし型番自体はどのパターンでも捕捉されていなかったため、新たに
+MODEL_NUMBER_PATTERN(「発売日の直後・13桁JANの直前」という位置関係で識別)を
+追加してextra["model_number"]として公開するようにした。20件中19件で正しく
+抽出、残り1件は型番欄自体が空(実データの仕様であり誤抽出ではない)ことを
+実データで確認済み。ProductIdentifierType.MODEL("model")としてのDB永続化は
+未実装(product_identifiersテーブル自体、JANを含めどの識別子種別についても
+書き込み処理がまだ無い、app/pipeline/market_matching.py参照)。
 """
 
 import re
@@ -62,6 +79,8 @@ CATEGORY_TRADING_FIGURES = "50103"
 # CLAUDE.md 1.3(2026-08-05追記)で確認済み。50108(トレカ・カード類)配下の
 # ワンピースカードゲーム専用サブカテゴリ。
 CATEGORY_ONE_PIECE_CARD = "5010800115"
+# CLAUDE.md 1.3(2026-08-05追記)で確認済み。ガンダムプラモデル専用サブカテゴリ。
+CATEGORY_GUNDAM = "5010401"
 
 # 実データ確認済み(raw_suruga_ya_search.html): hrefは絶対URLではなく
 # "/kaitori/kaitori_detail/{code}"という相対パス。念のため絶対URL表記も許容する。
@@ -86,6 +105,17 @@ JAN_AND_ID_PATTERN = re.compile(r"(?P<jan>\d{13})\s+(?P<id>\S+)")
 # コード抽出が分離しうる場合に再検討する)。そのため画像src取得用のヘルパーや
 # shinaban抽出用の正規表現定数もあえて追加していない。
 RELEASE_DATE_PATTERN = re.compile(r"(?P<y>\d{4})/(?P<mo>\d{2})/(?P<d>\d{2})")
+# 2026-08-05(ガンダムカテゴリ実データ確認時)追記: category=5010401(プラモデル)等では
+# 「発売日/型番/JANコード/管理番号」の4要素全てが埋まり、<br>区切りで
+# "2026/04/25<br>5072030<br>4573102720306<br>603227273"のように並ぶ。トレカ系
+# (カテゴリ50108配下)は型番が独立せず「発売日+管理番号」または「発売日+管理番号+JAN」の
+# 2〜3要素のみだったため、このパターンは無かった。型番は「発売日の直後・13桁JANコードの
+# 直前」という位置関係で識別する。トレカ系の3要素ケース(発売日の直後がJANそのもの)では、
+# \S+がJAN全体を貪欲マッチしても直後に\s+へ続く13桁の別トークンが存在しないため
+# マッチせず、model_numberはNoneのままになる(誤認しないことをテストで確認済み)。
+MODEL_NUMBER_PATTERN = re.compile(
+    r"\d{4}/\d{2}/\d{2}\s+(?P<model>\S+)\s+(?P<jan>\d{13})\b"
+)
 # Fixture注記2: 通常価格(無鑑定品)
 PRICE_PATTERN = re.compile(r"(?P<amount>[\d,]+)円")
 # Fixture注記3: 鑑定品価格の併記(例: 【PSA/GEM MT 10】： 9,000円)
@@ -194,12 +224,20 @@ class SurugaYaCollector(MarketCollector):
         jan_match = JAN_AND_ID_PATTERN.search(row_text)
         jan = jan_match["jan"] if jan_match else None
 
+        # 2026-08-05(ガンダムカテゴリ確認時)追記: 型番(プラモデル等、トレカ系には無い)。
+        # ProductIdentifierType.MODEL("model")としての永続化はまだパイプライン側
+        # (product_identifiersへの書き込み自体が現状JAN含めどの識別子種別についても
+        # 未実装)が無いため、他の識別子と同じくextraに載せるところまでとする。
+        model_match = MODEL_NUMBER_PATTERN.search(row_text)
+        model_number = model_match["model"] if model_match else None
+
         extra: dict = {
             "title": title,  # Product Matcher(app/matcher/product_matcher.py)での商品名照合に使う
             "management_number": management_number,
             "detail_url": detail_url,
             "release_date": release_date,
             "jan": jan,
+            "model_number": model_number,
         }
         if PRICE_RISING_TAG in row_text:
             extra["trend"] = "price_rising"
