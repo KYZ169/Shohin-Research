@@ -23,6 +23,19 @@
 `row.text()`でフラット化した時点では従来通り文字列として現れるため無変更)。
 ただし鑑定品価格(【PSA/GEM MT 10】等)については、今回取得した実HTMLに該当商品が
 含まれていなかったため実データでの動作確認はできていない(要検証)。
+
+【検証状況(2026-08-05、ワンピースカードカテゴリでの他ジャンル対応確認)】
+category=5010800115(ワンピースカードゲーム)で取得した実HTML
+(tests/fixtures/raw_html/raw_suruga_ya_onepiece.html)でも、コード変更無しで
+20件全件を正しく抽出できることを確認した。このデータには管理番号が"GU"始まりと
+"GN"始まりの両方(混在)で含まれていたが、主経路の`DETAIL_URL_PATTERN`が
+`[A-Za-z0-9]+`という接頭辞非依存のパターンで管理番号をURLから直接抽出しているため、
+`MANAGEMENT_NUMBER_PATTERN`("GU"限定のテキストフォールバック、通常到達しない)を
+変更する必要は無かった。[価格上昇中]タグ・メールにてお見積(quote_required)・
+confidence B/D判定もすべて既存実装のまま正しく機能した。カテゴリIDは元々
+コンストラクタ引数(`category`)で外部化されているため、ジャンル追加時は
+`CATEGORY_ONE_PIECE_CARD`のような定数を1行追加するだけでよく、パース側の
+コード変更は不要という設計になっていることも確認した。
 """
 
 import re
@@ -46,6 +59,9 @@ CATEGORY_TRADING_CARDS = "50108"
 CATEGORY_PLASTIC_MODELS = "50104"
 CATEGORY_FIGURES = "50102"
 CATEGORY_TRADING_FIGURES = "50103"
+# CLAUDE.md 1.3(2026-08-05追記)で確認済み。50108(トレカ・カード類)配下の
+# ワンピースカードゲーム専用サブカテゴリ。
+CATEGORY_ONE_PIECE_CARD = "5010800115"
 
 # 実データ確認済み(raw_suruga_ya_search.html): hrefは絶対URLではなく
 # "/kaitori/kaitori_detail/{code}"という相対パス。念のため絶対URL表記も許容する。

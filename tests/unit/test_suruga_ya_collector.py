@@ -18,10 +18,11 @@ from pathlib import Path
 import pytest
 
 from app.collectors.base import ParseError, RawFetchResult
-from app.collectors.markets.suruga_ya import JST, SurugaYaCollector
+from app.collectors.markets.suruga_ya import CATEGORY_ONE_PIECE_CARD, JST, SurugaYaCollector
 
 RAW_HTML_FIXTURE_PATH = Path(__file__).parent.parent / "fixtures" / "raw_html" / "raw_suruga_ya_search.html"
 GRADED_RAW_HTML_FIXTURE_PATH = Path(__file__).parent.parent / "fixtures" / "raw_html" / "raw_suruga_ya_graded.html"
+ONE_PIECE_RAW_HTML_FIXTURE_PATH = Path(__file__).parent.parent / "fixtures" / "raw_html" / "raw_suruga_ya_onepiece.html"
 
 HEADER_ROW = """
 <tr>
@@ -372,3 +373,38 @@ def test_parse_observations_graded_price_against_raw_html_fixture():
     assert len(quote_required_items) == 1
     assert "graded_price" not in quote_required_items[0].extra
     assert quote_required_items[0].amount is None
+
+
+def test_parse_observations_supports_other_genre_category_without_code_change():
+    """CLAUDE.md 3節「駿河屋Collectorの他ジャンル対応確認」に対応する検証。
+    category=5010800115(ワンピースカードゲーム)で本番ConoHa VPSから実際に取得した
+    生HTML(raw_suruga_ya_onepiece.html)を、コード変更無しでそのままparse_observations()に
+    通しても20件全件が正しく抽出できることを確認する。この実データには管理番号が
+    "GU"始まりと"GN"始まりの両方が混在しているが、主経路のDETAIL_URL_PATTERNが
+    接頭辞非依存([A-Za-z0-9]+)でURLから直接抽出しているため、"GU"限定の
+    MANAGEMENT_NUMBER_PATTERN(フォールバック)を変更する必要が無いことも合わせて確認する。
+    """
+    collector = SurugaYaCollector(category=CATEGORY_ONE_PIECE_CARD)
+    html = ONE_PIECE_RAW_HTML_FIXTURE_PATH.read_text(encoding="utf-8")
+
+    observations = collector.parse_observations(_raw(_search_url("トレカ"), html))
+
+    assert len(observations) == 20
+    assert all(o.extra["management_number"] is not None for o in observations)
+
+    gu_items = [o for o in observations if o.extra["management_number"].startswith("GU")]
+    gn_items = [o for o in observations if o.extra["management_number"].startswith("GN")]
+    assert gu_items and gn_items  # 接頭辞が混在した実データであることの前提確認
+
+    # GN始まりの管理番号(GU以外の接頭辞)でも価格が正しく取れている代表例
+    sample = next(o for o in observations if o.extra["management_number"] == "GN627559")
+    assert sample.amount == Decimal("45000")
+    assert sample.confidence == "B"
+
+    rising_items = [o for o in observations if o.extra.get("trend") == "price_rising"]
+    assert len(rising_items) == 1
+    assert rising_items[0].extra["management_number"] == "GU745830"
+
+    quote_required_items = [o for o in observations if o.extra.get("quote_required")]
+    assert len(quote_required_items) == 10
+    assert all(o.amount is None and o.confidence == "D" for o in quote_required_items)
