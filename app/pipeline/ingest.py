@@ -17,22 +17,69 @@
   要確認相当でも新規Productとして登録する(誤って統合するより安全側、技術分析11.3
   原則1「誤って別商品を統合する方が、統合できず個別表示されるより害が大きい」と整合)。
   将来的には要確認キューへ回す運用に置き換える必要がある(TODO)。
+
+【識別子(JAN/型番)の永続化について(2026-08-05追加、運用整備タスクの一環)】
+technical分析レポート11.2のJAN一致(+100)/型番一致(+80)によるスコアリング自体は
+app/matcher/product_matcher.py:calc_match_score()に元から実装済みだったが、
+呼び出し側であるこのモジュールが(1)新規Productへ識別子を永続化する処理、
+(2)既存Product候補側に永続化済みの識別子を積み込む処理、のいずれも欠けており、
+実質的に一度も機能していなかった(NormalizedItem.identifiers/MarketObservation.extra
+経由で識別子自体はCollector側で取得できていても、DBに一切残らずスコアリング時に
+毎回空の{}として扱われていたため)。本追加でsync_product_identifiers()による
+永続化と、product_to_candidate()での読み込みを実装する。
+
+識別子をどのタイミングでproduct_identifiersへ書き込んで良いかについては、
+「誤って別商品にNEEDS_REVIEW(要確認相当)でマッチしていた場合、間違ったJAN/型番が
+その商品に紐付いて以降の照合を汚染するリスクがある」との理由から、
+AUTO_MATCH/HIGH_PROBABILITY_MATCH(スコア70点以上)のときのみ既存Productへ
+書き込む方針とした(ユーザー確認済み)。新規Product作成時は、そのProduct自身の
+identifiersを紐付けるだけで他商品を汚染するリスクが無いため、この確認は不要として
+常に書き込む。
 """
 
 from sqlalchemy.orm import Session
 
 from app.collectors.base import NormalizedItem
-from app.db.models import Product, ReleaseEvent, Shop, Source
-from app.domain.enums import MatchStatus, ShopGranularity, ShopType
+from app.db.models import Product, ProductIdentifier, ReleaseEvent, Shop, Source
+from app.domain.enums import MatchStatus, ProductIdentifierType, ShopGranularity, ShopType
 from app.matcher.product_matcher import MatchCandidate, MatchResult, calc_match_score, extract_product_attributes
 
 __all__ = [
     "get_or_create_default_shop",
+    "sync_product_identifiers",
     "product_to_candidate",
     "find_best_match",
     "match_or_create_product",
     "ingest_normalized_item",
 ]
+
+# 既存Productへ識別子を書き込んでよい(=汚染リスクを許容できる)と判断する信頼度の下限。
+IDENTIFIER_PERSIST_STATUSES = (MatchStatus.AUTO_MATCH, MatchStatus.HIGH_PROBABILITY_MATCH)
+
+
+def sync_product_identifiers(session: Session, product: Product, identifiers: dict[str, str]) -> None:
+    """identifiers({"jan": "...", "model": "...", ...})をProductIdentifierとして
+    永続化する(既に同じ(product_id, type, value)があれば何もしない)。
+
+    「この時点でidentifiersをこのproductに紐付けて良いか」(照合confidence等)の
+    判断は呼び出し側の責務とする(モジュールdocstring「識別子の永続化について」参照)。
+    """
+    for type_key, value in identifiers.items():
+        if not value:
+            continue
+        try:
+            id_type = ProductIdentifierType(type_key)
+        except ValueError:
+            continue  # jan/isbn/sku/model以外のキーは想定外のため無視する
+
+        exists = (
+            session.query(ProductIdentifier)
+            .filter_by(product_id=product.id, type=id_type, value=value)
+            .one_or_none()
+        )
+        if exists is None:
+            session.add(ProductIdentifier(product_id=product.id, type=id_type, value=value))
+    session.flush()
 
 
 def get_or_create_default_shop(session: Session, source: Source) -> Shop:
@@ -48,9 +95,21 @@ def get_or_create_default_shop(session: Session, source: Source) -> Shop:
     return shop
 
 
-def product_to_candidate(product: Product) -> MatchCandidate:
+def product_to_candidate(session: Session, product: Product) -> MatchCandidate:
+    """既存Productをスコアリング候補に変換する。product_identifiersに永続化済みの
+    識別子(JAN/型番等)を積み込むことで、calc_match_score()のJAN/型番一致(+100/+80)を
+    実際に機能させる(モジュールdocstring「識別子の永続化について」参照)。
+
+    Product 1件ごとにクエリが1回発生する(find_best_match()のN+1、既存のTODOと同種の
+    Phase0簡略化。将来的にはfind_best_match側でまとめてJOIN取得する形に直す余地あり)。
+    """
+    identifiers = {
+        pi.type.value: pi.value
+        for pi in session.query(ProductIdentifier).filter_by(product_id=product.id).all()
+    }
     return MatchCandidate(
         name=product.name,
+        identifiers=identifiers,
         release_date=product.release_date,
         attributes=extract_product_attributes(product.name),
     )
@@ -65,7 +124,7 @@ def find_best_match(
     best_result: MatchResult | None = None
 
     for product in session.query(Product).filter(Product.deleted_at.is_(None)).all():
-        result = calc_match_score(candidate, product_to_candidate(product))
+        result = calc_match_score(candidate, product_to_candidate(session, product))
         if best_result is None or result.score > best_result.score:
             best_result = result
             best_product = product
@@ -89,29 +148,34 @@ def match_or_create_product(
     文字列が完全一致するケースはfuzzy matchingの出る幕もなく安全に断定できるため、
     技術分析11.3の「誤って別商品を統合する方が害が大きい」という原則には抵触しない。
     """
+    identifiers = identifiers or {}
+
     exact_match = (
         session.query(Product).filter(Product.deleted_at.is_(None), Product.name == product_name).one_or_none()
     )
     if exact_match is not None:
+        sync_product_identifiers(session, exact_match, identifiers)
         return exact_match, MatchStatus.AUTO_MATCH
 
     candidate = MatchCandidate(
         name=product_name,
-        identifiers=identifiers or {},
+        identifiers=identifiers,
         attributes=extract_product_attributes(product_name),
     )
 
     best_product, best_result = find_best_match(session, candidate)
 
-    if best_result is not None and best_result.status in (
-        MatchStatus.AUTO_MATCH,
-        MatchStatus.HIGH_PROBABILITY_MATCH,
-    ):
+    if best_result is not None and best_result.status in IDENTIFIER_PERSIST_STATUSES:
+        sync_product_identifiers(session, best_product, identifiers)
         return best_product, best_result.status
 
     new_product = Product(name=product_name)
     session.add(new_product)
     session.flush()
+    # 新規作成したProduct自身の識別子を紐付けるだけであり、既存の他Productを
+    # 誤って汚染するリスクが無いため、confidenceによる制限(IDENTIFIER_PERSIST_STATUSES)は
+    # 適用せず常に書き込む。
+    sync_product_identifiers(session, new_product, identifiers)
     status = best_result.status if best_result is not None else MatchStatus.DIFFERENT_PRODUCT
     return new_product, status
 

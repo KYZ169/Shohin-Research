@@ -18,6 +18,17 @@ AUTO_MATCH/HIGH_PROBABILITY_MATCH/NEEDS_REVIEWはいずれもマッチとして�
 またJAN/型番等の識別子が無い現状のCollector実装(タスク4・6時点)では、商品名の
 類似度だけで70点(HIGH_PROBABILITY_MATCH)に届くケースは限定的なため、40点未満
 だけを除外するくらいが現実的な閾値になる。
+
+【識別子(JAN/型番)によるスコアリングの結線について(2026-08-05追加)】
+駿河屋Collector(app/collectors/markets/suruga_ya.py)はextra["jan"]/
+extra["model_number"]としてJAN/型番を抽出できるが、これまでMatchCandidate生成時に
+渡されておらず、calc_match_score()のJAN一致(+100)/型番一致(+80)が一度も機能して
+いなかった(詳細はapp/pipeline/ingest.pyモジュールdocstring参照)。ここで
+identifiersとして渡すようにした。
+
+AUTO_MATCH/HIGH_PROBABILITY_MATCHのときのみsync_product_identifiers()で
+product_identifiersへ永続化する(NEEDS_REVIEW相当の弱いマッチで誤って別商品に
+識別子を紐付け、以降の照合を汚染するリスクを避けるため。ユーザー確認済み)。
 """
 
 from sqlalchemy.orm import Session
@@ -26,7 +37,7 @@ from app.collectors.markets.base import MarketObservation
 from app.db.models import Product
 from app.domain.enums import MatchStatus
 from app.matcher.product_matcher import MatchCandidate, extract_product_attributes
-from app.pipeline.ingest import find_best_match
+from app.pipeline.ingest import IDENTIFIER_PERSIST_STATUSES, find_best_match, sync_product_identifiers
 
 __all__ = ["match_observation_to_product"]
 
@@ -36,17 +47,28 @@ def match_observation_to_product(
 ) -> tuple[Product, MatchStatus] | None:
     """MarketObservation.extra["title"](タスク13で追加、app/collectors/markets/suruga_ya.py参照)を
     既存Productと照合する。DIFFERENT_PRODUCT(モジュールdocstring参照)のみマッチ無しとする。
+    extra["jan"]/extra["model_number"](駿河屋Collector等が対応)があれば
+    JAN一致(+100)/型番一致(+80)のスコアリングにも使う(モジュールdocstring参照)。
     """
     title = observation.extra.get("title")
     if not title:
         return None
 
-    candidate = MatchCandidate(name=title, attributes=extract_product_attributes(title))
+    identifiers: dict[str, str] = {}
+    if observation.extra.get("jan"):
+        identifiers["jan"] = observation.extra["jan"]
+    if observation.extra.get("model_number"):
+        identifiers["model"] = observation.extra["model_number"]
+
+    candidate = MatchCandidate(name=title, identifiers=identifiers, attributes=extract_product_attributes(title))
     best_product, best_result = find_best_match(session, candidate)
 
     if best_product is None or best_result is None:
         return None
     if best_result.status == MatchStatus.DIFFERENT_PRODUCT:
         return None
+
+    if best_result.status in IDENTIFIER_PERSIST_STATUSES:
+        sync_product_identifiers(session, best_product, identifiers)
 
     return best_product, best_result.status

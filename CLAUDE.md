@@ -210,7 +210,7 @@
 | 5 | プレミアムバンダイCollector実装 | 実装仕様書 Prompt 3拡張 | ❌ 断念（Akamai Bot Managerにより個別商品ページもJS実行必須と判明、CLAUDE.mdの方針上ここでは正面突破しない） |
 | 6 | 駿河屋Market Collector実装 | 実装仕様書10章・Prompt 4 | ✅ 完了（本番VPS生HTMLで検証済み。相対href・href=None対応の修正済み、1.5節参照。JANコード抽出(タスク15)も実データで確認済み） |
 | 7 | 地域解決ロジック実装（`resolve_region()`、`fulfillment_type`フィルタ） | 実装仕様書1.3節、4.3節 | ✅ 完了 |
-| 8 | 商品照合スコアリング実装（JAN一致・商品名類似度・単位不一致ペナルティ等） | 技術分析レポート11章 | ✅ 完了（単位不一致は減点ではなく89点上限キャップとして実装、None属性は不一致判定しない） |
+| 8 | 商品照合スコアリング実装（JAN一致・商品名類似度・単位不一致ペナルティ等） | 技術分析レポート11章 | ✅ 完了（単位不一致は減点ではなく89点上限キャップとして実装、None属性は不一致判定しない。⚠️2026-08-05発覚: スコアリング自体は完了していたが、呼び出し側がproduct_identifiersへの永続化・読み込みを配線しておらず、JAN/型番一致が実質一度も機能していなかった。タスク13/4節参照） |
 | 9 | Profit Engine実装（未確定コスト分離ロジック必須） | 実装仕様書2章・Prompt 5 | ✅ 完了（未確定コストは金額計算から完全除外、確認済み） |
 | 10 | Opportunity Scorer実装 | 実装仕様書3章・Prompt 6 | ✅ 完了（未確定コストがスコアに影響しないことをinspect.signatureで構造的に保証） |
 | 11 | Discord通知実装（締切不明時フォールバック含む） | 実装仕様書4章・Prompt 7 | ✅ 完了（商品照合match_statusの可視化を追加修正済み。地域の要確認とは別フィールドで表示） |
@@ -266,3 +266,14 @@
 3. **Collector稼働状況の確認用CLIコマンド**: `scripts/collector_status.py`を追加。`collector_runs`テーブル(新規、Alembicマイグレーション`ac68151d8952`)に各Collectorタスクが実行のたびに成否を記録する仕組み(`app/scheduler/run_log.py`)を導入し、CLIはタスクごとの最終実行結果・経過時間・`beat_schedule`から算出した想定間隔に対する遅延の有無を表示する。`--history N`で直近N件の履歴も見られる。実データでOK/NG両方の表示を確認済み。
    - **副次的に発見・修正したバグ**: このCLIの実データ確認中、`run_suruga_ya_price_rising_scan`が実際には**2キーワードとも毎回失敗していた**ことが判明した。原因はhttpxのデフォルト(`follow_redirects=False`)で、`category=501`+`restrict[]=purchase_hendou=価格上昇中`の組み合わせでsuruga-ya.jpがURLエンコード方式正規化のため301を返すことに対応できていなかったため。`app/collectors/markets/suruga_ya.py`・`app/collectors/sources/ichiban_kuji.py`・`app/collectors/sources/pokemon_center_online.py`の3Collector全てで`httpx.AsyncClient(..., follow_redirects=True)`に統一して修正した。定期実行結線(タスク12)は完了扱いだったが、実際には主要な巡回対象の一つが機能していなかったことになる。稼働状況CLIが無ければ気づけなかった不具合。
 4. **aiohttpの"Unclosed connector"警告の修正**: `scripts/verify_live_e2e.py`の`_send_to_discord()`で実機再現し、`client.close()`直後にTCPConnectorの内部クリーンアップがイベントループの次のイテレーションで非同期に走るため、`asyncio.run()`のコルーチンが即座に返ると間に合わず警告が出ることを確認した(discord.py+aiohttpの既知のteardownタイミング問題)。`await asyncio.sleep(0.25)`をclose()直後に追加して解消。修正前後で実機再現・警告消失を確認済み。discord.Clientのゲートウェイ接続(`client.start()`)を行っているのはこのスクリプトのみで、他に本番稼働中のDiscord gatewayプロセスは無い(`app/main.py`はFastAPI REST APIのみ)。
+
+## 5. product_identifiers永続化パイプライン実装(2026-08-05)
+
+ガンダムカテゴリ対応(3節)の副産物として、`product_identifiers`テーブルがどの識別子種別(JAN含む)についても一度も書き込まれていないことが判明した。技術分析レポート11.2のJAN一致(+100)/型番一致(+80)スコアリング自体は`app/matcher/product_matcher.py:calc_match_score()`にタスク8の当初から実装済みだったが、呼び出し側(`app/pipeline/ingest.py`・`app/pipeline/market_matching.py`)が(1)新規/マッチ済みProductへの永続化、(2)既存Product候補への読み込み、のいずれも配線していなかったため、**実質的に一度も機能していなかった**(常に空の`{}`同士の比較になっていた)。
+
+- `app/pipeline/ingest.py`に`sync_product_identifiers()`を追加。`product_to_candidate()`が`product_identifiers`を読み込んでcandidateへ積むようにし、`match_or_create_product()`が新規Product作成時・AUTO_MATCH/HIGH_PROBABILITY_MATCH時に識別子を永続化するようにした。
+- `app/pipeline/market_matching.py`の`match_observation_to_product()`も、`observation.extra["jan"]`/`extra["model_number"]`をidentifiersとして渡すよう修正(ガンダムカテゴリ対応(3節)で追加した型番もここで初めて実際に使われるようになった)。
+- **既存Productへの識別子書き込みは、AUTO_MATCH/HIGH_PROBABILITY_MATCH(スコア70点以上)のときのみに限定した**(ユーザー確認済みの方針)。NEEDS_REVIEW相当の弱いマッチで誤って別商品にJAN/型番を紐付けると、以降の照合が汚染されるリスクがあるため。新規Product作成時は自分自身の識別子を紐付けるだけで他商品を汚染するリスクが無いため、この制限は適用していない。
+- `calc_match_score()`本体・`AUTO_MATCH_THRESHOLD`等の閾値定数は一切変更していない。既存のE2Eテスト(`test_collect_to_notification_pipeline_end_to_end`)の「商品名完全一致・識別子なしはNEEDS_REVIEW」というアサーションも無修正のまま通ることを確認済み。
+- 実際にJAN一致・型番一致による自動一致が発生することを`tests/integration/test_product_identifier_matching.py`(新規5件)で確認した。うち1件は実Fixture(`raw_suruga_ya_gundam.html`)から`SurugaYaCollector`で実際に抽出したJAN/型番の値を使い、商品名が異なる2件の観測値が同一Productへ自動一致することをend-to-endで検証している。ソース側Collector(一番くじ/ポケセン)は現状JAN/型番を一切抽出しない(`normalize()`が`identifiers={}`固定)ため、両側が有機的に重なる完全な実データシナリオは現時点では作れず、実Fixtureから取れた本物の識別子の値を使いつつ商品名だけ変える構成で検証した(テスト内コメントに明記)。
+- 全体テスト195件(unit 165 + integration 30)全pass。
