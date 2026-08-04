@@ -9,3 +9,6 @@ venv/
 
 # scripts/verify_collectors.pyの検証結果(本番実データを含むためコミットしない)
 verify_result*.json
+
+# scripts/verify_live_e2e.shの実行ログ(本番実データ・Opportunity内容を含むためコミットしない)
+verify_logs/

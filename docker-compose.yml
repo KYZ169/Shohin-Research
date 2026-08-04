@@ -21,7 +21,11 @@ services:
       POSTGRES_PASSWORD: resale_radar
       POSTGRES_DB: resale_radar
     ports:
-      - "5432:5432"
+      # 本番ConoHa VPSには別プロジェクト(aquarium系Bot群)用のネイティブPostgreSQLが
+      # 既にホストの5432番を使用しているため、コンテナ内部は5432のままホスト側のみ
+      # 55432に変更して衝突を避ける(api/worker/beatコンテナ同士の通信はdocker
+      # ネットワーク内でdbホスト名:5432を使うため、この変更による影響は無い)。
+      - "55432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
