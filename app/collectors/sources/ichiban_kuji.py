@@ -26,11 +26,21 @@ CLAUDE.md 1.1 / 8.5, 実装仕様書9章の実測結果に基づく:
 - 商品名は`<p class="itemName">`に独立して格納されており、日付テキストを正規表現で
   除去して切り出す必要がなくなった。
 
-bandaispirits.co.jpの商品詳細ページ(_parse_bandaispirits_detail)は、本番VPSでの
-生HTML取得がまだ行われていないため、引き続きMarkdown変換済みテキストのFixture
-(tests/fixtures/html/bandaispirits_detail_20260803.md)をもとにしたテキスト
-パターンベースの抽出ロジックのままであり、実サイトの生HTML構造に対しては未検証
-(トップページと同様の問題が起きる可能性がある。要検証)。
+【検証状況(2026-08-04、本番ConoHa VPSでの実データ検証により更新)】
+bandaispirits.co.jpの商品詳細ページ(_parse_bandaispirits_detail)も、本番VPSで
+実際に取得した生HTML(tests/fixtures/raw_html/raw_bandaispirits_detail.html、
+鬼滅の刃、通常の一番くじ商品)で動作検証済み。価格・発売日・商品名の抽出
+(ラベル行+値行のテキストパターンマッチ)は、当初Markdown変換済みテキストの
+Fixture(tests/fixtures/html/bandaispirits_detail_20260803.md)をもとに書いた
+推測実装のまま、追加の実装変更無しで実データに対しても正しく機能することを確認した
+(「価格」「発売日」「商品詳細」のラベル行はいずれも本文中に1回しか出現せず、
+`lines.index()`による最初の一致が誤って別の箇所を拾う心配もない)。
+一方、商品画像(image_urls)だけは実データで誤りが判明し修正した:
+`tree.css_first("img")`がページ最初の`<img>`要素(ヘッダーの
+`/assets/img/logo_01.svg`、BANDAI SPIRITSロゴ)を拾ってしまい、商品画像では
+なかった。実際の商品画像は`div.l_productsSlider`内にまとまっており(alt属性が
+商品名と一致、先頭が商品全体の代表画像・以降は個別景品の画像)、このコンテナ配下の
+`img`から取得するよう修正した。
 """
 
 import re
@@ -287,13 +297,16 @@ class IchibanKujiCollector(SourceCollector):
             # 単一日時想定のため、ここでは開始日のみを採用し終了日は破棄している。
             # 期間をどう保持するかはスキーマ設計側の判断が必要なため、そのままTODOとして残す。
 
+        # 実データ確認済み(raw_bandaispirits_detail.html): ページ先頭のtree.css_first("img")は
+        # ヘッダーのBANDAI SPIRITSロゴ(/assets/img/logo_01.svg)を拾ってしまい、商品画像では
+        # なかった(暫定実装のバグ)。実際の商品画像は`div.l_productsSlider`内の`img`(alt属性が
+        # 商品名と一致)にまとまっており、先頭の1枚が商品全体の代表画像、以降は個別景品の画像。
         image_urls: list[str] = []
-        first_img = tree.css_first("img")
+        slider = tree.css_first(".l_productsSlider")
+        first_img = slider.css_first("img") if slider is not None else None
         if first_img is not None:
             src = first_img.attributes.get("src")
             if src:
-                # Fixtureでは商品タイトル直前に商品画像が1枚ある構成だったための暫定実装。
-                # 実HTMLでの位置関係は未検証(モジュールdocstring参照)。
                 image_urls.append(src)
 
         return ParsedItem(

@@ -21,6 +21,7 @@ from app.collectors.base import ParseError, RawFetchResult
 from app.collectors.markets.suruga_ya import JST, SurugaYaCollector
 
 RAW_HTML_FIXTURE_PATH = Path(__file__).parent.parent / "fixtures" / "raw_html" / "raw_suruga_ya_search.html"
+GRADED_RAW_HTML_FIXTURE_PATH = Path(__file__).parent.parent / "fixtures" / "raw_html" / "raw_suruga_ya_graded.html"
 
 HEADER_ROW = """
 <tr>
@@ -336,5 +337,38 @@ def test_parse_observations_against_raw_html_fixture():
     assert quote_item.confidence == "D"
     assert quote_item.extra["quote_required"] is True
 
-    # 鑑定品価格(GRADED_PRICE_PATTERN)については、このFixtureには該当商品が
-    # 含まれていなかったため実データでの検証はできていない(要検証)。
+    # 鑑定品価格(GRADED_PRICE_PATTERN)についてはraw_suruga_ya_search.htmlには該当商品が
+    # 含まれていなかったが、raw_suruga_ya_graded.htmlによる検証を
+    # test_parse_observations_graded_price_against_raw_html_fixtureで別途行っている。
+
+
+def test_parse_observations_graded_price_against_raw_html_fixture():
+    """CLAUDE.md 3節「駿河屋の鑑定品価格の実データでの動作確認」に対応する検証。
+    本番ConoHa VPSで実際に取得した「鑑定品高価買取中」フィルタ結果(raw_suruga_ya_graded.html)
+    には、鑑定品価格(【PSA/GEM MT 10】：)がラベルと金額が別要素(<label>直下のテキストと
+    その中の<font>)に分かれた実DOM構造で20件中19件に含まれる。GRADED_PRICE_PATTERNの
+    \\s*は行送り(改行)込みの空白にもマッチするため、テキストフラット化後も追加の実装変更
+    無しで正しくgrade/amountの両方が分離抽出できることを確認する(実データでの初検証)。"""
+    collector = SurugaYaCollector()
+    html = GRADED_RAW_HTML_FIXTURE_PATH.read_text(encoding="utf-8")
+
+    observations = collector.parse_observations(_raw(_search_url(""), html))
+
+    assert len(observations) == 20
+
+    graded_items = [o for o in observations if "graded_price" in o.extra]
+    assert len(graded_items) == 19
+    assert all(o.extra["graded_price"]["grade"] == "PSA/GEM MT 10" for o in graded_items)
+    assert all(isinstance(o.extra["graded_price"]["amount"], Decimal) for o in graded_items)
+
+    # 無鑑定品価格と鑑定品価格が正しく分離されている代表例
+    # (【PSA/GEM MT 10】：9,000円 の直前に無鑑定価格500円が別途記載されている行)
+    sample = next(o for o in graded_items if o.extra["graded_price"]["amount"] == Decimal("9000"))
+    assert sample.amount == Decimal("500")
+
+    # メールにてお見積(quote_required)の1件は、鑑定品価格が併記されていない
+    # (=graded_priceが無いのは実データの仕様であり、抽出漏れではない)ことを確認する
+    quote_required_items = [o for o in observations if o.extra.get("quote_required")]
+    assert len(quote_required_items) == 1
+    assert "graded_price" not in quote_required_items[0].extra
+    assert quote_required_items[0].amount is None

@@ -7,10 +7,17 @@ div.swiper-slide > a + div.txtCol > p.status/p.date/p.itemName)を最小限に
 再現したものである(app/collectors/sources/ichiban_kuji.py のモジュールdocstring参照)。
 raw_1kuji_top.htmlそのものを使った検証はtest_parse_top_page_against_raw_html_fixtureで行う。
 
-bandaispirits.co.jpの商品詳細ページ側は、本番VPSでの生HTML取得がまだ行われていないため、
-引き続きtests/fixtures/html/bandaispirits_detail_20260803.md(Markdown変換済みテキスト)
-で観察されたテキストパターンを再現した最小限のHTMLに対するテストのままである
-(実サイトの生HTML構造そのものに対する検証ではない点に注意)。
+bandaispirits.co.jpの商品詳細ページ側も、本番ConoHa VPSで実際に取得した生HTML
+(tests/fixtures/raw_html/raw_bandaispirits_detail.html)で動作検証済み。価格/発売日/
+商品名の抽出(ラベル行+値行のテキストパターンマッチ)は実データでもそのまま機能したが、
+商品画像(image_urls)だけは実データで誤りが判明し修正した: tree.css_first("img")が
+ページ最初の<img>(ヘッダーのBANDAI SPIRITSロゴ)を拾ってしまい、商品画像ではなかった。
+実際の商品画像はdiv.l_productsSlider内にまとまっているため、このコンテナ配下のimgを
+取得するよう修正した(app/collectors/sources/ichiban_kuji.pyのコメント参照)。
+raw_bandaispirits_detail.htmlそのものを使った検証はtest_parse_bandaispirits_detail_against_raw_html_fixtureで行う。
+BANDAISPIRITS_FREE_ITEM_HTML/BANDAISPIRITS_NORMAL_PRICE_ITEM_HTMLの2つは引き続き
+Markdown変換済みテキストをもとにした合成HTMLのままである(無料配布・期間表記等、
+今回取得した実データには含まれないケースの検証用として維持)。
 """
 
 from datetime import datetime
@@ -24,6 +31,9 @@ from app.collectors.sources.ichiban_kuji import JST, IchibanKujiCollector
 from app.domain.enums import FulfillmentType, RegionSource
 
 RAW_HTML_FIXTURE_PATH = Path(__file__).parent.parent / "fixtures" / "raw_html" / "raw_1kuji_top.html"
+BANDAISPIRITS_RAW_HTML_FIXTURE_PATH = (
+    Path(__file__).parent.parent / "fixtures" / "raw_html" / "raw_bandaispirits_detail.html"
+)
 
 # 実データ確認済み(raw_1kuji_top.html)の実際のDOM構造を最小限に再現したもの。
 # - 商品詳細へのリンクは絶対URLではなく相対パス"/products/{slug}"
@@ -229,6 +239,33 @@ def test_parse_bandaispirits_detail_extracts_normal_price_format():
     assert item.price == Decimal("790")
     assert "price_raw_text" not in item.extra
     assert item.start_at == datetime(2026, 9, 5, tzinfo=JST)
+
+
+def test_parse_bandaispirits_detail_against_raw_html_fixture():
+    """CLAUDE.md 3節「bandaispirits.co.jpの商品詳細ページの生HTML取得・検証」に対応する検証。
+    本番ConoHa VPSで実際に取得した一番くじ(鬼滅の刃、通常の一番くじ商品)の商品詳細ページ
+    そのものに対する検証。商品名・価格・発売日はFixtureベースの推測実装のまま追加の
+    修正無しで正しく抽出できたが、image_urlsだけはページ最初のimgがヘッダーロゴを
+    指しており誤りだったため修正した(モジュールdocstring参照)。"""
+    collector = IchibanKujiCollector()
+    html = BANDAISPIRITS_RAW_HTML_FIXTURE_PATH.read_text(encoding="utf-8")
+
+    item = collector.parse(
+        _raw(
+            "https://www.bandaispirits.co.jp/products/search/detail.php?prd_id=kimetsu29&grp_id=9999",
+            html,
+        )
+    )[0]
+
+    assert item.raw_title == "一番くじ 鬼滅の刃～姉の仇～"
+    assert item.price == Decimal("790")
+    assert "price_raw_text" not in item.extra
+    assert item.start_at == datetime(2025, 11, 29, tzinfo=JST)
+    assert item.extra["release_date_raw_text"] == "2025年11月29日(土)より順次発売予定"
+    # 修正前はヘッダーロゴ(/assets/img/logo_01.svg)を拾っていた
+    assert item.image_urls == [
+        "https://assets.1kuji.com/uploads/product/image/10559/f3aaa250-ded5-480b-b5f9-2f393b67ad1c.jpg"
+    ]
 
 
 def test_normalize_uses_extracted_fulfillment_type_and_unknown_region():

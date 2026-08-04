@@ -23,6 +23,10 @@ from app.domain.enums import FulfillmentType, RegionSource, SupportedEventType
 
 PRODUCT_URL = "https://www.pokemoncenter-online.com/9900000006082.html"
 RAW_HTML_FIXTURE_PATH = Path(__file__).parent.parent / "fixtures" / "raw_html" / "raw_pokemon_center.html"
+NORMAL_SALE_RAW_HTML_FIXTURE_PATH = (
+    Path(__file__).parent.parent / "fixtures" / "raw_html" / "raw_pokemon_center_normal_sale.html"
+)
+NORMAL_SALE_PRODUCT_URL = "https://www.pokemoncenter-online.com/4521329432069.html"
 
 # Fixture(pokemon_center_online_product_20260803.md)の該当箇所を、
 # ラベル行+値行の並びを保ったまま最小限のHTMLとして再現したもの。
@@ -242,3 +246,33 @@ def test_parse_against_raw_html_fixture():
     assert item.extra["inventory_status"] == "品切れ"
     assert item.extra["purchase_limit_count"] == 1
     assert item.extra["product_code"] == "9900000006082"
+
+
+def test_parse_against_normal_sale_raw_html_fixture():
+    """CLAUDE.md 3節「ポケモンセンターオンラインの通常販売ページの実データ確認」に対応する
+    検証。抽選なしの通常販売商品(デッキシールド)の実ページには「各種期間」セクションが
+    実際に存在せず、event_type=NORMAL_SALEと判定されることを実データで初めて確認する。
+    あわせて、抽選ページとはHTML構造が異なる(各種期間ブロックが無い分レイアウトが
+    変わっている)通常販売ページでも、価格・商品名・在庫状況・購入上限の抽出が
+    従来の実装のまま引き続き機能することを確認する(追加の実装変更は不要だった)。"""
+    collector = PokemonCenterOnlineCollector()
+    html = NORMAL_SALE_RAW_HTML_FIXTURE_PATH.read_text(encoding="utf-8")
+
+    item = collector.parse(_raw(NORMAL_SALE_PRODUCT_URL, html))[0]
+
+    assert item.event_type == SupportedEventType.NORMAL_SALE
+    assert "デッキシールド" in item.raw_title
+    assert item.price == Decimal("990")
+    assert item.extra["inventory_status"] == "品切れ"
+    assert item.extra["purchase_limit_count"] == 5
+    assert item.extra["product_code"] == "4521329432069"
+    # 各種期間セクションが無いページなので、期間系フィールドは全てNoneのまま
+    assert item.start_at is None
+    assert item.deadline_at is None
+    assert item.announce_at is None
+    assert item.purchase_limit_at is None
+    assert item.extra["delivery_timing_text"] is None
+
+    normalized = collector.normalize([item])[0]
+    # 通常販売(各種期間が確認できない)は信頼度Bになる(normalize()のconfidence_hintロジック)
+    assert normalized.confidence_hint == "B"
