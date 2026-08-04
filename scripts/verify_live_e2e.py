@@ -181,6 +181,12 @@ async def _send_to_discord(embed_dict: dict, channel_id: int) -> dict:
         # 既にcloseされていても再度closeはno-opなので無条件に呼んでよい。
         if not client.is_closed():
             await client.close()
+        # close()を呼んだ直後でもTCPConnectorの内部クリーンアップはイベントループの
+        # 次のイテレーションで非同期に走るため、close()直後にasyncio.run()のコルーチンが
+        # 即座に返ってしまうと間に合わず"Unclosed connector"ResourceWarningが出ることを
+        # 実機再現で確認した(discord.py+aiohttpのteardownタイミングに起因する既知の挙動)。
+        # 1イベントループぶんの猶予を与えることで解消する。
+        await asyncio.sleep(0.25)
 
     return send_result
 

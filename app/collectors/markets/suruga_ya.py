@@ -124,7 +124,11 @@ class SurugaYaCollector(MarketCollector):
         url = f"{SEARCH_URL}?{urlencode(params)}"
 
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            # follow_redirects=True: category=501+restrict[]の組み合わせ等で、
+            # suruga-ya.jpがURLエンコード方式の正規化のため301を返すことを実機で確認した
+            # (2026-08-05、Collector稼働状況CLI導入時に発見)。httpxはデフォルトで
+            # リダイレクトを追わないため、指定しないとFetchErrorになってしまう。
+            async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
                 response = await client.get(url)
         except httpx.HTTPError as exc:
             raise FetchError(f"{url} の取得に失敗しました: {exc}") from exc

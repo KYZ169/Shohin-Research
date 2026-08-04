@@ -134,7 +134,10 @@ class PokemonCenterOnlineCollector(SourceCollector):
 
     async def fetch(self, target_url: str) -> RawFetchResult:
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            # follow_redirects=True: app/collectors/markets/suruga_ya.pyと同じ理由
+            # (2026-08-05、Collector稼働状況CLI導入時にsuruga-ya.jpの301で発覚)。
+            # httpxはデフォルトでリダイレクトを追わないため統一して有効化する。
+            async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
                 response = await client.get(target_url)
         except httpx.HTTPError as exc:
             raise FetchError(f"{target_url} の取得に失敗しました: {exc}") from exc

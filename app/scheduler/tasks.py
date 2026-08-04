@@ -24,7 +24,7 @@ from decimal import Decimal
 
 import redis as redis_module
 
-from app.collectors.base import CollectorRunResult, FetchError, ParseError
+from app.collectors.base import CollectorHealth, CollectorRunResult, FetchError, ParseError
 from app.collectors.markets.base import MarketDataType, MarketObservation
 from app.collectors.markets.suruga_ya import SurugaYaCollector
 from app.collectors.sources.ichiban_kuji import IchibanKujiCollector
@@ -37,6 +37,7 @@ from app.pipeline.market_matching import match_observation_to_product
 from app.pipeline.notify import evaluate_notification
 from app.pipeline.opportunity_pipeline import build_and_score_opportunity
 from app.scheduler.celery_app import celery_app
+from app.scheduler.run_log import record_collector_run
 
 logger = logging.getLogger(__name__)
 
@@ -48,11 +49,25 @@ SURUGA_YA_SCAN_KEYWORDS = ["一番くじ", "ポケモンカード"]
 SURUGA_YA_PRICE_RISING_RESTRICT = "purchase_hendou=価格上昇中"
 
 
-@celery_app.task(name="app.scheduler.tasks.run_ichiban_kuji_collector")
+ICHIBAN_KUJI_TASK_NAME = "app.scheduler.tasks.run_ichiban_kuji_collector"
+
+
+@celery_app.task(name=ICHIBAN_KUJI_TASK_NAME)
 def run_ichiban_kuji_collector() -> dict:
     """CLAUDE.md 8.5.4: 6時間に1回、1kuji.comのPICK UP ITEMを巡回する。"""
+    started_at = datetime.now(tz=JST)
     collector = IchibanKujiCollector()
-    result: CollectorRunResult = asyncio.run(collector.run())
+    try:
+        result: CollectorRunResult = asyncio.run(collector.run())
+    except Exception as exc:
+        # collector.run()は通常FetchError/ParseErrorを内部でCollectorHealthに
+        # 変換して正常returnする設計だが、想定外の例外(プログラムバグ等)は
+        # ここまで飛んでくる。Celery自体の失敗検知は変えたくないのでraiseし直すが、
+        # 稼働状況CLIから「実行はされたが落ちた」ことが見えるよう記録は残す。
+        record_collector_run(
+            ICHIBAN_KUJI_TASK_NAME, started_at, status="failure", error_message=f"{type(exc).__name__}: {exc}"
+        )
+        raise
 
     logger.info(
         "ichiban_kuji collector run finished: health=%s success=%d error=%d errors=%s",
@@ -60,6 +75,15 @@ def run_ichiban_kuji_collector() -> dict:
         result.success_count,
         result.error_count,
         result.errors,
+    )
+    # OK/DEGRADED(一部欠落はあっても実行自体は完走)はsuccess、FAILING/DISABLEDはfailure扱い。
+    status = "success" if result.health in (CollectorHealth.OK, CollectorHealth.DEGRADED) else "failure"
+    record_collector_run(
+        ICHIBAN_KUJI_TASK_NAME,
+        started_at,
+        status=status,
+        summary=f"health={result.health.value} success={result.success_count} error={result.error_count}",
+        error_message="; ".join(result.errors) if status == "failure" and result.errors else None,
     )
     return {
         "source_name": result.source_name,
@@ -69,15 +93,20 @@ def run_ichiban_kuji_collector() -> dict:
     }
 
 
-@celery_app.task(name="app.scheduler.tasks.run_suruga_ya_price_rising_scan")
+SURUGA_YA_SCAN_TASK_NAME = "app.scheduler.tasks.run_suruga_ya_price_rising_scan"
+
+
+@celery_app.task(name=SURUGA_YA_SCAN_TASK_NAME)
 def run_suruga_ya_price_rising_scan() -> dict:
     """CLAUDE.md 1.3: 価格上昇中フィルタでの差分取得を1日1〜2回実行する。
 
     MarketCollectorはSourceCollectorと異なりrun()を持たない(技術分析10章の設計どおり
     search()/parse_observations()のみ)ため、このタスク内でオーケストレーションする。
     """
+    started_at = datetime.now(tz=JST)
     collector = SurugaYaCollector()
     keyword_results: dict[str, int] = {}
+    error_messages: list[str] = []
     error_count = 0
 
     for keyword in SURUGA_YA_SCAN_KEYWORDS:
@@ -92,8 +121,19 @@ def run_suruga_ya_price_rising_scan() -> dict:
             )
         except (FetchError, ParseError) as exc:
             error_count += 1
+            error_messages.append(f"{keyword}: {exc}")
             logger.warning("suruga_ya price-rising scan failed for keyword=%s: %s", keyword, exc)
 
+    # 一部キーワードだけ失敗してもタスク自体は完走する設計のため、全キーワードが
+    # 失敗した場合のみfailure、1件でも取れていればsuccess(部分成功)として記録する。
+    status = "failure" if error_count == len(SURUGA_YA_SCAN_KEYWORDS) else "success"
+    record_collector_run(
+        SURUGA_YA_SCAN_TASK_NAME,
+        started_at,
+        status=status,
+        summary=f"keyword_results={keyword_results} error_count={error_count}",
+        error_message="; ".join(error_messages) if error_messages else None,
+    )
     return {"keyword_results": keyword_results, "error_count": error_count}
 
 

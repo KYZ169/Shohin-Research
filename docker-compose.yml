@@ -1,8 +1,12 @@
 services:
   api:
     build: .
+    restart: unless-stopped
     ports:
-      - "8000:8000"
+      # ホスト側の8000番は別プロジェクト(stockappユーザーのuvicorn、127.0.0.1:8000)が
+      # 既に使用しているため、db(55432番)と同様の理由でホスト側のみ8001に変更する
+      # (コンテナ内部は8000のまま、api/worker/beat間の通信には影響しない)。
+      - "8001:8000"
     env_file:
       - .env
     depends_on:
@@ -16,6 +20,7 @@ services:
 
   db:
     image: postgres:16-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_USER: resale_radar
       POSTGRES_PASSWORD: resale_radar
@@ -36,6 +41,7 @@ services:
 
   redis:
     image: redis:7-alpine
+    restart: unless-stopped
     ports:
       - "6379:6379"
     healthcheck:
@@ -46,6 +52,7 @@ services:
 
   worker:
     build: .
+    restart: unless-stopped
     command: celery -A app.scheduler.celery_app worker --loglevel=info
     env_file:
       - .env
@@ -59,6 +66,7 @@ services:
 
   beat:
     build: .
+    restart: unless-stopped
     command: celery -A app.scheduler.celery_app beat --loglevel=info
     env_file:
       - .env

@@ -213,7 +213,7 @@
 | 9 | Profit Engine実装（未確定コスト分離ロジック必須） | 実装仕様書2章・Prompt 5 | ✅ 完了（未確定コストは金額計算から完全除外、確認済み） |
 | 10 | Opportunity Scorer実装 | 実装仕様書3章・Prompt 6 | ✅ 完了（未確定コストがスコアに影響しないことをinspect.signatureで構造的に保証） |
 | 11 | Discord通知実装（締切不明時フォールバック含む） | 実装仕様書4章・Prompt 7 | ✅ 完了（商品照合match_statusの可視化を追加修正済み。地域の要確認とは別フィールドで表示） |
-| 12 | Celery Beatでの定期実行結線 | — | ✅ 完了（収集結果のDB反映・Opportunity生成は含まず、Collector起動のみ。詳細はタスク13で対応） |
+| 12 | Celery Beatでの定期実行結線 | — | ✅ 完了（収集結果のDB反映・Opportunity生成は含まず、Collector起動のみ。詳細はタスク13で対応。⚠️2026-08-05、稼働状況CLI導入時にrun_suruga_ya_price_rising_scanが301未対応で毎回全滅していたバグを発見・修正、4節参照） |
 | 13 | E2Eパイプライン実装（収集→商品照合→Profit Engine→Opportunity→dedupe→Embed組み立て） | — | ✅ 完了（Fixtureベースの統合テストのみ、実サイトでの動作は未検証） |
 | 14 | ポケモンセンターオンラインCollector実装 | 本ファイル1.4節のFixture・正規表現パターン | ✅ 完了（本番VPS生HTMLで検証済み。各種期間4フィールドはそのまま機能、価格抽出のみ実データ不一致が判明し修正、1.5節参照） |
 | 15 | 駿河屋CollectorへJANコード抽出を追加 | 本ファイル1.3節のFixture(`suruga_ya_jan_confirmation_20260803.md`) | ✅ 完了（本番VPS生HTMLでも抽出できることを確認済み） |
@@ -253,3 +253,15 @@
 - ~~ポケモンセンターオンラインの通常販売ページ(「各種期間」セクションが無いページ)の実データ確認~~ → **確認済み(1.6節・タスク18)。event_type=NORMAL_SALE判定・価格/商品名/在庫/購入上限の抽出とも既存実装のまま正しく機能、修正不要**
 
 これらは実装を進めながら随時実データで確認し、本ファイルおよび実装仕様書に追記していく運用とする。
+
+---
+
+## 4. 運用整備タスク(2026-08-05実施)
+
+データ消失・運用停止に直結する項目を優先して着手・完了した。
+
+1. **PostgreSQLの自動バックアップ**: `scripts/backup_db.sh`を追加。`docker compose exec db pg_dump`でコンテナ内のpg_dumpを使う(ホスト側libpqとpostgres:16-alpineのバージョン不一致を避けるため)。gzip圧縮して`/home/user1/backups/shohin-research/`に保存、14日超で自動削除。dbコンテナ未起動時やダンプが空/壊れている場合は本配置前に検知して失敗させる(中途半端なファイルを正常なバックアップとして残さない)。cronに`10 4 * * *`で登録済み(Aqualium側の`backup_all.sh`が4:00のため10分ずらした)。実行テスト済み、28個のCREATE TABLE/COPY文を含む正常なダンプを確認。復元手順はスクリプト内コメント参照。
+2. **VPS再起動後の自動復旧**: `docker-compose.yml`の全5サービス(api/db/redis/worker/beat)に`restart: unless-stopped`を追加。`docker.service`は元々systemdで`enabled`済みのため、VPS再起動時はdockerd起動→各コンテナがrestartポリシーに従って自動復旧する。この過程で`api`サービスが実は一度も起動していなかったこと(ホスト8000番が別プロジェクト`stockapp`の127.0.0.1:8000と衝突していたため)が判明し、ホスト側ポートを8001に変更して解消した(dbの55432番と同じ理由の回避策)。dockerデーモン自体の再起動によるフルテストはClaude Codeの権限分類で止められたため未実施(sudo systemctl restart dockerが必要な操作のため)。設定の適用自体(`docker inspect`での`RestartPolicy.Name=unless-stopped`)は全5コンテナで確認済み。
+3. **Collector稼働状況の確認用CLIコマンド**: `scripts/collector_status.py`を追加。`collector_runs`テーブル(新規、Alembicマイグレーション`ac68151d8952`)に各Collectorタスクが実行のたびに成否を記録する仕組み(`app/scheduler/run_log.py`)を導入し、CLIはタスクごとの最終実行結果・経過時間・`beat_schedule`から算出した想定間隔に対する遅延の有無を表示する。`--history N`で直近N件の履歴も見られる。実データでOK/NG両方の表示を確認済み。
+   - **副次的に発見・修正したバグ**: このCLIの実データ確認中、`run_suruga_ya_price_rising_scan`が実際には**2キーワードとも毎回失敗していた**ことが判明した。原因はhttpxのデフォルト(`follow_redirects=False`)で、`category=501`+`restrict[]=purchase_hendou=価格上昇中`の組み合わせでsuruga-ya.jpがURLエンコード方式正規化のため301を返すことに対応できていなかったため。`app/collectors/markets/suruga_ya.py`・`app/collectors/sources/ichiban_kuji.py`・`app/collectors/sources/pokemon_center_online.py`の3Collector全てで`httpx.AsyncClient(..., follow_redirects=True)`に統一して修正した。定期実行結線(タスク12)は完了扱いだったが、実際には主要な巡回対象の一つが機能していなかったことになる。稼働状況CLIが無ければ気づけなかった不具合。
+4. **aiohttpの"Unclosed connector"警告の修正**: `scripts/verify_live_e2e.py`の`_send_to_discord()`で実機再現し、`client.close()`直後にTCPConnectorの内部クリーンアップがイベントループの次のイテレーションで非同期に走るため、`asyncio.run()`のコルーチンが即座に返ると間に合わず警告が出ることを確認した(discord.py+aiohttpの既知のteardownタイミング問題)。`await asyncio.sleep(0.25)`をclose()直後に追加して解消。修正前後で実機再現・警告消失を確認済み。discord.Clientのゲートウェイ接続(`client.start()`)を行っているのはこのスクリプトのみで、他に本番稼働中のDiscord gatewayプロセスは無い(`app/main.py`はFastAPI REST APIのみ)。
