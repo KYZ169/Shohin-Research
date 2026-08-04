@@ -33,7 +33,10 @@ class OpportunityActionView(discord.ui.View):
         self,
         event_id: str,
         opportunity_id: str,
-        api_base_url: str = "http://localhost:8000",
+        # 2026-08-05: ホスト側のapiサービス公開ポートを8000→8001に変更した
+        # (docker-compose.yml参照、ホスト8000番は別プロジェクトと衝突していたため)ため
+        # デフォルト値もそれに合わせた。
+        api_base_url: str = "http://localhost:8001",
         http_client: httpx.AsyncClient | None = None,
         timeout: float | None = None,
     ) -> None:
