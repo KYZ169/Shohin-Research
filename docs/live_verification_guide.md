@@ -250,6 +250,20 @@ cd ~/Shohin-Research
 venv/bin/python3 scripts/verify_live_e2e.py --interaction-wait-seconds 180
 ```
 
+スマホ1台での画面切り替えを避けたい場合、バックグラウンド実行してログをファイルに残す方式でも良い。
+**その場合は`python3 -u`(unbuffered)を必ず付けること**。付けないと非対話実行時は標準出力が
+ブロックバッファリングされ、プロセスが終了するまでログファイルに何も書き出されない
+(`on_ready`のログすら実行直後には確認できず、実質的に待機時間ぶん無反応に見える)。
+
+```bash
+cd ~/Shohin-Research
+PYTHONUNBUFFERED=1 nohup venv/bin/python3 -u scripts/verify_live_e2e.py --interaction-wait-seconds 180 \
+  > discord_verify_log.txt 2>&1 &
+disown
+sleep 10
+cat discord_verify_log.txt   # on_readyのログが出ていれば接続成功
+```
+
 ### ログの見方
 
 以下の行が出れば、ゲートウェイへの実接続に成功している(discord.pyの`on_ready`相当):
@@ -285,7 +299,7 @@ venv/bin/python3 scripts/verify_live_e2e.py --interaction-wait-seconds 180
 
 | ボタン | 押した後の見た目 | 裏側の確認方法(任意) |
 |---|---|---|
-| **応募済みにする** | 「応募済みにしました。」というephemeralメッセージ(自分にしか見えない)が表示される | DB側は`docker compose exec db psql -U resale_radar resale_radar -c "SELECT * FROM lottery_entries ORDER BY created_at DESC LIMIT 1;"`で1行増えているか確認できる |
+| **応募済みにする** | 「応募済みにしました。」というephemeralメッセージ(自分にしか見えない)が表示される | DB側は`docker compose exec db psql -U resale_radar resale_radar -c "SELECT * FROM lottery_entries ORDER BY applied_at DESC LIMIT 1;"`で1行増えているか確認できる |
 | **ウォッチリスト登録** | 「ウォッチリストに登録しました。」というephemeralメッセージが表示される | `docker compose exec db psql -U resale_radar resale_radar -c "SELECT * FROM watchlists ORDER BY created_at DESC LIMIT 1;"`で確認できる |
 | **非表示** | 元のメッセージ自体が「非表示にしました。」に書き換わり、Embed・ボタンが消える | `docker compose exec db psql -U resale_radar resale_radar -c "SELECT status FROM opportunities ORDER BY id DESC LIMIT 1;"`が`hidden`になっているか確認できる |
 
