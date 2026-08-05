@@ -248,7 +248,7 @@
 - ポケモンセンターオンラインの商品一覧ページ（カテゴリ別・新着別）のURL・構造確認（個別ページのURLパターンから商品コードを収集する巡回設計に必要、タスク14の報告参照）
 - **【2026-08-05・重要度が上がった既存項目】ポケモンセンターオンラインの商品コード(13桁)がJANコードと一致するかの確認**: 5節でproduct_identifiers永続化パイプラインが実装され、JAN一致(+100)による自動一致が実際に機能するようになったため、この確認の優先度が上がっている。一致するなら`identifiers={}`固定(`app/collectors/sources/pokemon_center_online.py`)をJAN設定に変更するだけで、Source Collector側からもJANが供給されるようになる。
 - **【2026-08-05・新規】一番くじ(bandaispirits.co.jp商品詳細ページ)にJAN/型番相当の情報が含まれているか未確認**: 現状`app/collectors/sources/ichiban_kuji.py`のnormalize()も`identifiers={}`固定。5節の実装で判明した通り、仕入れ側(一番くじ/ポケセン)・相場側(駿河屋)の双方にJAN/型番が揃わない限りJAN一致ロジックの実効性は限定的（現状は相場側の駿河屋のみ識別子を持つため、同一商品が仕入れ側にも登場した際の自動一致にはまだ寄与できていない）。bandaispirits.co.jpの商品詳細ページ(1.1節・1.6節でFixture取得済み)にJAN/型番相当のフィールドがあるか、生HTMLを再確認する必要がある。
-- ~~Discord Bot側のInteraction実装（実装済み。discord.pyのゲートウェイ実接続のみ未検証、タスク16の報告参照）~~ → **確認済み(7節、2026-08-05)。常時起動Bot(`app/bot/main.py`)経由でゲートウェイ実接続・Embed+ボタン付きメッセージ送信を実機確認。ボタンを実際に押しての最終確認はユーザー実施待ち**
+- ~~Discord Bot側のInteraction実装（実装済み。discord.pyのゲートウェイ実接続のみ未検証、タスク16の報告参照）~~ → **確認済み(7節・8節、2026-08-05)。常時起動Bot(`app/bot/main.py`)経由でゲートウェイ実接続・Embed+ボタン付きメッセージ送信を実機確認。ユーザーが実際に3ボタン(応募済み/ウォッチ/非表示)を押し、`lottery_entries`/`watchlists`への行追加・`opportunities.status='hidden'`へのDB反映まで確認済み。途中`api_base_url`の既定値がbotコンテナから到達不能で「応答しませんでした」になるバグを発見・修正(8節参照)**
 - **【2026-08-05・新規、別タスクとして記録】Discord操作(応募済みにする/ウォッチリスト登録/非表示/マージ確定API)には権限チェックが一切無い**: `app/notification/interaction_view.py`の既存3ボタン、および6節で追加した`POST /manual-review-tasks/{id}/resolve`(照合の確定/棄却=商品Productのマージ)のいずれも、`verify_api_key`(単一ユーザー前提のAPIキー認証)以外のユーザー単位の権限チェックを持たない。個人利用の現段階では実害は小さいが、特にマージ確定操作は後戻りしにくいため、複数ユーザー対応(Phase5)までに必ず対応が必要。
 - **【2026-08-05・新規、別タスクとして記録】`OpportunityActionView`のボタンはcustom_idを明示していないため、Botプロセスの再起動を跨いで機能しない**: discord.pyの永続View(`bot.add_view()`+固定`custom_id`)にしていないため、送信済みメッセージのボタンはそれを送った`discord.Client`インスタンスがプロセス内に生き続けている間しか反応しない。`app/bot/main.py`(常時起動Bot)が再起動すると、それ以前に送信済みのメッセージのボタンは全て無反応になる(見た目上はボタンが残ったままなのに押しても反応しない、静かな劣化)。実運用でBotの再起動(デプロイ・クラッシュ等)が発生する前提なら、`custom_id`を`event_id`/`opportunity_id`を埋め込んだ固定文字列にし、`on_ready`等で`bot.add_view()`により永続化する対応が必要。
 - ~~一番くじ/駿河屋/ポケモンセンターオンラインの本番VPS実データ検証~~ → **確認済み(1.5節・タスク17)。判明した問題は修正済み**
@@ -323,3 +323,13 @@
 - `scripts/verify_live_e2e.py`は使い捨ての単発検証専用のまま維持し、docstringに`app/bot/main.py`との役割の違いを明記した(混同防止、ユーザー指定)。
 - `docs/live_verification_guide.md`「6. ボタンの実接続検証」を、6-A(常時起動Bot、推奨)/6-B(使い捨てスクリプト、代替)の2本立てに再構成した。
 - 全体テスト(unit 165 + integration 42)無影響、全pass。
+
+## 9. Discord Interaction実機検証 完了(2026-08-05)
+
+8節の修正後、常時起動Bot経由でユーザーが実際にDiscordアプリから3ボタンを押し、以下を確認した。
+
+- 「応募済みにする」→ ephemeral応答表示、`lottery_entries`に1行(`result=pending`)
+- 「ウォッチリスト登録」→ ephemeral応答表示、`watchlists`に1行
+- 「非表示」→ メッセージ書き換え、`opportunities.status='hidden'`
+
+タスク16(Discord Bot Interaction実装)は、ゲートウェイ実接続・ボタン押下→FastAPI→DB反映までの経路を全てエンドツーエンドで実機確認済みとなった。
