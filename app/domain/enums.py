@@ -83,3 +83,12 @@ class LotteryEntryResult(str, Enum):
     PENDING = "pending"
     WON = "won"
     LOST = "lost"
+
+
+class ManualReviewTaskStatus(str, Enum):
+    """manual_review_tasks.status(2026-08-05追加、MatchStatus.MANUALLY_CONFIRMEDの
+    運用先。app/pipeline/manual_review.py参照)。"""
+
+    PENDING = "pending"
+    CONFIRMED = "confirmed"  # candidate_productをmatched_productへ統合(マージ)した
+    REJECTED = "rejected"  # 別商品と判断し、candidate_productは分離したまま維持

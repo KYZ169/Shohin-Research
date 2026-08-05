@@ -37,11 +37,14 @@ identifiersを紐付けるだけで他商品を汚染するリスクが無いた
 常に書き込む。
 """
 
+from datetime import datetime
+
 from sqlalchemy.orm import Session
 
 from app.collectors.base import NormalizedItem
-from app.db.models import Product, ProductIdentifier, ReleaseEvent, Shop, Source
-from app.domain.enums import MatchStatus, ProductIdentifierType, ShopGranularity, ShopType
+from app.core.time import JST
+from app.db.models import ManualReviewTask, Product, ProductIdentifier, ReleaseEvent, Shop, Source
+from app.domain.enums import ManualReviewTaskStatus, MatchStatus, ProductIdentifierType, ShopGranularity, ShopType
 from app.matcher.product_matcher import MatchCandidate, MatchResult, calc_match_score, extract_product_attributes
 
 __all__ = [
@@ -177,6 +180,22 @@ def match_or_create_product(
     # 適用せず常に書き込む。
     sync_product_identifiers(session, new_product, identifiers)
     status = best_result.status if best_result is not None else MatchStatus.DIFFERENT_PRODUCT
+
+    # NEEDS_REVIEW(要確認)の場合のみ、実際に比較した既存候補(best_product)がある
+    # ため、人間が確定/棄却できるようmanual_review_tasksへ1行記録する
+    # (候補が無くDIFFERENT_PRODUCTになったケースは統合先が存在しないため対象外)。
+    if status == MatchStatus.NEEDS_REVIEW and best_product is not None:
+        session.add(
+            ManualReviewTask(
+                candidate_product_id=new_product.id,
+                matched_product_id=best_product.id,
+                score=best_result.score,
+                status=ManualReviewTaskStatus.PENDING,
+                created_at=datetime.now(tz=JST),
+            )
+        )
+        session.flush()
+
     return new_product, status
 
 

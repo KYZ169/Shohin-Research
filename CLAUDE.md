@@ -249,6 +249,7 @@
 - **【2026-08-05・重要度が上がった既存項目】ポケモンセンターオンラインの商品コード(13桁)がJANコードと一致するかの確認**: 5節でproduct_identifiers永続化パイプラインが実装され、JAN一致(+100)による自動一致が実際に機能するようになったため、この確認の優先度が上がっている。一致するなら`identifiers={}`固定(`app/collectors/sources/pokemon_center_online.py`)をJAN設定に変更するだけで、Source Collector側からもJANが供給されるようになる。
 - **【2026-08-05・新規】一番くじ(bandaispirits.co.jp商品詳細ページ)にJAN/型番相当の情報が含まれているか未確認**: 現状`app/collectors/sources/ichiban_kuji.py`のnormalize()も`identifiers={}`固定。5節の実装で判明した通り、仕入れ側(一番くじ/ポケセン)・相場側(駿河屋)の双方にJAN/型番が揃わない限りJAN一致ロジックの実効性は限定的（現状は相場側の駿河屋のみ識別子を持つため、同一商品が仕入れ側にも登場した際の自動一致にはまだ寄与できていない）。bandaispirits.co.jpの商品詳細ページ(1.1節・1.6節でFixture取得済み)にJAN/型番相当のフィールドがあるか、生HTMLを再確認する必要がある。
 - Discord Bot側のInteraction実装（実装済み。discord.pyのゲートウェイ実接続のみ未検証、タスク16の報告参照）
+- **【2026-08-05・新規、別タスクとして記録】Discord操作(応募済みにする/ウォッチリスト登録/非表示/マージ確定API)には権限チェックが一切無い**: `app/notification/interaction_view.py`の既存3ボタン、および6節で追加した`POST /manual-review-tasks/{id}/resolve`(照合の確定/棄却=商品Productのマージ)のいずれも、`verify_api_key`(単一ユーザー前提のAPIキー認証)以外のユーザー単位の権限チェックを持たない。個人利用の現段階では実害は小さいが、特にマージ確定操作は後戻りしにくいため、複数ユーザー対応(Phase5)までに必ず対応が必要。
 - ~~一番くじ/駿河屋/ポケモンセンターオンラインの本番VPS実データ検証~~ → **確認済み(1.5節・タスク17)。判明した問題は修正済み**
 - ~~bandaispirits.co.jpの商品詳細ページの生HTML取得・検証~~ → **確認済み(1.6節・タスク18)。価格/発売日/商品名は修正不要、商品画像(image_urls)がヘッダーロゴを誤取得していた不具合を発見・修正済み**
 - ~~駿河屋の鑑定品価格(【PSA/GEM MT 10】等)の実データでの動作確認~~ → **確認済み(1.6節・タスク18)。既存実装のまま正しく機能、修正不要**
@@ -277,4 +278,21 @@
 - **既存Productへの識別子書き込みは、AUTO_MATCH/HIGH_PROBABILITY_MATCH(スコア70点以上)のときのみに限定した**(ユーザー確認済みの方針)。NEEDS_REVIEW相当の弱いマッチで誤って別商品にJAN/型番を紐付けると、以降の照合が汚染されるリスクがあるため。新規Product作成時は自分自身の識別子を紐付けるだけで他商品を汚染するリスクが無いため、この制限は適用していない。
 - `calc_match_score()`本体・`AUTO_MATCH_THRESHOLD`等の閾値定数は一切変更していない。既存のE2Eテスト(`test_collect_to_notification_pipeline_end_to_end`)の「商品名完全一致・識別子なしはNEEDS_REVIEW」というアサーションも無修正のまま通ることを確認済み。
 - 実際にJAN一致・型番一致による自動一致が発生することを`tests/integration/test_product_identifier_matching.py`(新規5件)で確認した。うち1件は実Fixture(`raw_suruga_ya_gundam.html`)から`SurugaYaCollector`で実際に抽出したJAN/型番の値を使い、商品名が異なる2件の観測値が同一Productへ自動一致することをend-to-endで検証している。ソース側Collector(一番くじ/ポケセン)は現状JAN/型番を一切抽出しない(`normalize()`が`identifiers={}`固定)ため、両側が有機的に重なる完全な実データシナリオは現時点では作れず、実Fixtureから取れた本物の識別子の値を使いつつ商品名だけ変える構成で検証した(テスト内コメントに明記)。
+
+## 6. manual_review_tasks(要確認キューの手動確定)実装(2026-08-05)
+
+`MatchStatus.MANUALLY_CONFIRMED`が定義以来一度も設定される経路を持たず(enumのdocstringが「将来のmanual_review_tasks運用」と明記したまま放置されていた)、NEEDS_REVIEW(要確認)の照合を人間が確定させても、その時点でJAN/型番がproduct_identifiersへ書き込まれる経路が存在しないことが判明した。5節の永続化パイプラインと合わせて、要確認キューの手動解決機能を実装した。
+
+**設計上の重要な発見**: 「確定」操作は単なるstatus更新ではない。`match_or_create_product()`はNEEDS_REVIEW時点で既に独立した新規Product(candidate)を作成済みであり、この時点で`release_events`/`opportunities`/`product_identifiers`/`watchlists`の4テーブルから外部キー参照されうる。したがって「確定」は、candidate側のこれら4テーブル分のレコードをmatched_product側へ実際に付け替えるマージ処理になる。
+
+- `manual_review_tasks`テーブルを新規作成(id, candidate_product_id, matched_product_id, score, status[pending/confirmed/rejected], created_at, resolved_at, resolved_by)。`match_or_create_product()`がNEEDS_REVIEW判定時、実際に比較した既存候補があれば1行自動作成する。
+- `app/pipeline/manual_review.py`の`resolve_manual_review_task()`がマージ本体。以下の設計判断で実装した:
+  1. **複数release_eventsの付け替え**: 異なる店舗・日程のrelease_eventsが複数あっても全件付け替える(技術分析9章のイベント/商品分離の設計通り、複数あること自体は問題ない)。ただし`release_events`には`(product_id, shop_id, event_type, start_at)`のUNIQUE制約があるため、matched側に全く同じイベントが既にある場合(同一イベントの重複観測)だけは、`product_identifiers`/`watchlists`と同様に重複を避けてcandidate側を削除する扱いにした(単純な全件付け替えだとIntegrityErrorになることが判明したため、当初案から修正)。
+  2. **付け替え漏れの検証**: マージの最後に4テーブル全てに対し、candidate_product_idへの参照が0件であることをアサーションで直接検証する(`_assert_no_remaining_references()`)。
+  3. **ロールバック保証**: `session.begin_nested()`(SAVEPOINT)でマージ全体を包み、アサーション失敗を含むあらゆる例外でその範囲だけを確実にロールバックする。`tests/integration/test_manual_review.py::test_merge_failure_rolls_back_partial_reassignment`で、検証部分だけ失敗させても付け替え済みのrelease_event・soft-delete済みのcandidateまで含めて正しく巻き戻ることを実際に確認済み。
+  4. **識別子(type,value)/ウォッチ(user_id)が重複するケース**: matched側に既に同じ組み合わせがあればcandidate側を削除するだけにし、重複を作らない。
+- 入口はCLI(`scripts/manual_review_cli.py list`/`resolve <task_id> confirm|reject --by <name>`)とWeb API(`GET /manual-review-tasks`・`POST /manual-review-tasks/{id}/resolve`、`app/api/routers/manual_review_tasks.py`)の両方を実装した。Discordゲートウェイ接続が未検証(1.1節・タスク16参照)なマージという後戻りしにくい操作を、いきなり未検証の経路で検証するのを避けるため、Discordボタンはこのタスクのスコープに含めていない(CLI/APIで先に検証してから、既存の`interaction_view.py`と同じ「DiscordボタンがFastAPI経由でDBを操作する」アーキテクチャに沿って追加する想定)。
+- CLIで実データ(新規Product 2件→NEEDS_REVIEW発生→confirm解決→マージ確認)を実際に動かして動作確認済み。テストはunit 165件+integration 49件(既存37+新規12: マージ処理7件・API層5件)全pass。
+
+**別タスクとして記録(今回のスコープ外)**: Discord操作(応募済み/ウォッチ/非表示/今回追加したマージ確定API)には権限チェックが一切無い。個人利用の現段階では実害は小さいが、複数ユーザー対応(Phase5)までに必ず対応が必要(CLAUDE.md 3節に記録)。
 - 全体テスト195件(unit 165 + integration 30)全pass。
