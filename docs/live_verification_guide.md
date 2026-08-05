@@ -216,3 +216,89 @@ tmux kill-session -t verify
 
 上記で解決しない場合は、`verify_logs/`配下に各段階のログが保存されているので、
 `summary_<日時>.log`を確認すると全体の流れを追いやすい。
+
+---
+
+## 6. ボタン(応募済み/ウォッチ/非表示)の実接続検証(2026-08-05追加)
+
+これまで`scripts/verify_live_e2e.py`はEmbedを送信した直後にBotを切断していたため、
+ボタン付きメッセージが一度も送信されておらず、押しても反応しない状態だった
+(`app/notification/discord_bot.py`にボタン(View)を渡す経路自体が無かった)。
+これを修正し、`--interaction-wait-seconds`オプションで送信後もBotの接続を維持して
+ボタン操作を受信できるようにした。
+
+### 事前準備: FastAPIも起動しておく
+
+ボタンのコールバックは`app/notification/interaction_view.py`経由で
+`api`サービス(FastAPI、`http://localhost:8001`)を叩く。`docker compose up -d`で
+`api`サービスも起動していることを確認する(通常のE2E検証(1〜5節)はDB/Redis/
+worker/beatだけで完結するため、ここだけ追加で必要)。
+
+```bash
+cd ~/Shohin-Research
+docker compose up -d
+curl -s http://localhost:8001/health   # {"status":"ok"} が返ればOK
+```
+
+### 実行
+
+tmuxセッションの中で、`--interaction-wait-seconds`に「ボタンを押すまでの待ち時間(秒)」を
+指定して実行する(120〜300秒程度を推奨。スマホでDiscordアプリを開く時間を見込む)。
+
+```bash
+cd ~/Shohin-Research
+venv/bin/python3 scripts/verify_live_e2e.py --interaction-wait-seconds 180
+```
+
+### ログの見方
+
+以下の行が出れば、ゲートウェイへの実接続に成功している(discord.pyの`on_ready`相当):
+
+```
+  [ OK ] Discordゲートウェイへ接続しました(on_ready発火、user=<Bot名>#<番号>, id=<BotのユーザーID>)
+```
+
+続いて送信成功のメッセージとjump_url(メッセージへの直接リンク)が表示される:
+
+```
+[ OK ] 送信成功: message_id=... channel_id=...
+        https://discord.com/channels/.../.../...
+```
+
+ここで**指定した秒数だけプロセスが待機する**。この間にDiscordアプリで実際にメッセージを開き、
+3つのボタンのいずれかを押すと、以下のようなログがその場で出力される:
+
+```
+  [interaction受信 #1] user=<あなたのDiscordユーザー名>(<ユーザーID>) custom_id='...' component_type=2
+```
+
+待機時間が終わると、受信したInteraction数の合計が表示される:
+
+```
+  待機終了。受信したInteraction数: 2
+```
+
+### 3ボタンそれぞれの確認手順
+
+送信されたメッセージには以下3つのボタンが付いている。**1回の実行で3つとも試したい場合は、
+--interaction-wait-secondsを長め(300秒程度)にしておくと余裕を持って全部押せる。**
+
+| ボタン | 押した後の見た目 | 裏側の確認方法(任意) |
+|---|---|---|
+| **応募済みにする** | 「応募済みにしました。」というephemeralメッセージ(自分にしか見えない)が表示される | DB側は`docker compose exec db psql -U resale_radar resale_radar -c "SELECT * FROM lottery_entries ORDER BY created_at DESC LIMIT 1;"`で1行増えているか確認できる |
+| **ウォッチリスト登録** | 「ウォッチリストに登録しました。」というephemeralメッセージが表示される | `docker compose exec db psql -U resale_radar resale_radar -c "SELECT * FROM watchlists ORDER BY created_at DESC LIMIT 1;"`で確認できる |
+| **非表示** | 元のメッセージ自体が「非表示にしました。」に書き換わり、Embed・ボタンが消える | `docker compose exec db psql -U resale_radar resale_radar -c "SELECT status FROM opportunities ORDER BY id DESC LIMIT 1;"`が`hidden`になっているか確認できる |
+
+いずれのボタンも、上記ephemeralメッセージ(自分にしか見えない返信)が表示されれば
+「Interactionが正しく受信され、FastAPI(`api`サービス)への書き込みまで成功した」ことを
+意味する。エラーになる場合は「処理に失敗しました。」とだけ表示される簡素な作りのため、
+原因を追うには`docker compose logs api`(または`api`をローカルのvenvで直接動かしている場合は
+そのターミナル出力)を確認すること。
+
+### 同じメッセージに何度もボタンを押した場合の挙動
+
+- 「応募済みにする」「ウォッチリスト登録」は冪等(同じ組み合わせなら2回目以降もエラーにならず
+  既存の行がそのまま返る)。
+- 「非表示」を一度押すとメッセージ自体が書き換わりボタンが消えるため、同じメッセージに対して
+  再度押すことはできない(再検証したい場合は`verify_live_e2e.py`をもう一度実行して
+  新しいメッセージを送る)。

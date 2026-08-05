@@ -119,20 +119,72 @@ def _print_stage_summary(result: dict) -> None:
         print(f"最終段階({result.get('stage')})で失敗しました: {result.get('error')}")
 
 
-async def _send_to_discord(embed_dict: dict, channel_id: int) -> dict:
+async def _send_to_discord(
+    embed_dict: dict,
+    channel_id: int,
+    event_id: str,
+    opportunity_id: str,
+    interaction_wait_seconds: int,
+) -> dict:
+    """Embedを送信し、OpportunityActionView(応募済み/ウォッチ/非表示ボタン、
+    app/notification/interaction_view.py)を添付する。interaction_wait_seconds>0の
+    場合、送信後もクライアントを閉じずに待機し、その間に届いたInteraction
+    (ボタン押下)をon_interactionでログ出力する
+    (2026-08-05: ゲートウェイ実接続・ボタン動作検証のため追加。それまでは
+    on_ready直後にcloseする一回限りの接続で、Embedのみ送信しView自体
+    一度も添付されたことが無かった)。
+    """
     import discord
 
     from app.notification.discord_bot import NotificationService
+    from app.notification.interaction_view import OpportunityActionView
 
     send_result: dict = {}
+    ready_event = asyncio.Event()
+    interaction_count = 0
 
     intents = discord.Intents.default()
 
-    class _OneShotClient(discord.Client):
+    class _VerificationClient(discord.Client):
         async def on_ready(self) -> None:
+            print(f"  [ OK ] Discordゲートウェイへ接続しました(on_ready発火、user={self.user}, id={self.user.id})")
+            ready_event.set()
+
+        async def on_interaction(self, interaction: discord.Interaction) -> None:
+            nonlocal interaction_count
+            interaction_count += 1
+            custom_id = interaction.data.get("custom_id") if interaction.data else None
+            component_type = interaction.data.get("component_type") if interaction.data else None
+            print(
+                f"  [interaction受信 #{interaction_count}] "
+                f"user={interaction.user}({interaction.user.id}) "
+                f"custom_id={custom_id!r} component_type={component_type!r}"
+            )
+
+    client = _VerificationClient(intents=intents)
+    start_task = asyncio.ensure_future(client.start(settings.discord_bot_token))
+
+    try:
+        ready_waiter = asyncio.ensure_future(ready_event.wait())
+        done, _pending = await asyncio.wait({ready_waiter, start_task}, timeout=30, return_when=asyncio.FIRST_COMPLETED)
+
+        if start_task in done and start_task.exception() is not None:
+            raise start_task.exception()
+
+        if ready_waiter not in done:
+            ready_waiter.cancel()
+            send_result["ok"] = False
+            send_result["error"] = (
+                "on_readyが30秒以内に発火しませんでした。"
+                "VPSからDiscordゲートウェイへの疎通、またはBotトークンの有効性を確認してください。"
+            )
+        else:
             try:
-                service = NotificationService(self)
-                message = await service.send_opportunity_notification(channel_id, embed_dict)
+                service = NotificationService(client)
+                view = OpportunityActionView(
+                    event_id=event_id, opportunity_id=opportunity_id, timeout=interaction_wait_seconds or None
+                )
+                message = await service.send_opportunity_notification(channel_id, embed_dict, view=view)
                 send_result["ok"] = True
                 send_result["message_id"] = message.id
                 send_result["channel_id"] = message.channel.id
@@ -152,19 +204,16 @@ async def _send_to_discord(embed_dict: dict, channel_id: int) -> dict:
             except Exception as exc:  # noqa: BLE001 - 検証スクリプトなので極力全部拾って報告する
                 send_result["ok"] = False
                 send_result["error"] = f"{type(exc).__name__}: {exc}"
-            finally:
-                await self.close()
 
-    client = _OneShotClient(intents=intents)
-    try:
-        await asyncio.wait_for(client.start(settings.discord_bot_token), timeout=30)
-    except asyncio.TimeoutError:
-        send_result.setdefault("ok", False)
-        send_result.setdefault(
-            "error",
-            "on_readyが30秒以内に発火しませんでした。"
-            "VPSからDiscordゲートウェイへの疎通、またはBotトークンの有効性を確認してください。",
-        )
+            if send_result.get("ok") and interaction_wait_seconds > 0:
+                print()
+                print(
+                    f"  ボタンを{interaction_wait_seconds}秒待ちます。"
+                    "Discordアプリで実際に「応募済みにする」「ウォッチリスト登録」「非表示」を押してみてください..."
+                )
+                await asyncio.sleep(interaction_wait_seconds)
+                print(f"  待機終了。受信したInteraction数: {interaction_count}")
+                send_result["interaction_count"] = interaction_count
     except discord.LoginFailure as exc:
         send_result["ok"] = False
         send_result["error"] = f"ログイン失敗(discord.LoginFailure): {exc}. DISCORD_BOT_TOKENが正しいか確認してください。"
@@ -181,6 +230,12 @@ async def _send_to_discord(embed_dict: dict, channel_id: int) -> dict:
         # 既にcloseされていても再度closeはno-opなので無条件に呼んでよい。
         if not client.is_closed():
             await client.close()
+        if not start_task.done():
+            start_task.cancel()
+        try:
+            await start_task
+        except (asyncio.CancelledError, discord.LoginFailure, discord.PrivilegedIntentsRequired, Exception):
+            pass
         # close()を呼んだ直後でもTCPConnectorの内部クリーンアップはイベントループの
         # 次のイテレーションで非同期に走るため、close()直後にasyncio.run()のコルーチンが
         # 即座に返ってしまうと間に合わず"Unclosed connector"ResourceWarningが出ることを
@@ -199,6 +254,16 @@ def main() -> int:
         help="bandaispirits.co.jpの商品prd_id(既定: kimetsu29。CLAUDE.md 1.6節で動作確認済み)",
     )
     parser.add_argument("--timeout", type=int, default=60, help="Celeryタスクの結果待ちタイムアウト秒(既定: 60)")
+    parser.add_argument(
+        "--interaction-wait-seconds",
+        type=int,
+        default=0,
+        help=(
+            "0より大きい場合、Embed送信後もその秒数だけBotの接続を維持し、"
+            "応募済み/ウォッチ/非表示ボタンの押下(Interaction)を受信してログ表示する"
+            "(2026-08-05追加、ゲートウェイ実接続・ボタン動作検証用。既定は0=送信後すぐ切断)"
+        ),
+    )
     args = parser.parse_args()
 
     _print_header("実データE2E検証(収集 → DB → 商品照合 → Profit Engine → Opportunity → Discord通知)")
@@ -241,11 +306,17 @@ def main() -> int:
 
     _print_header("Discordへ送信します")
     channel_id = int(settings.discord_notify_channel_id)
-    send_result = asyncio.run(_send_to_discord(result["embed"], channel_id))
+    event_id = result["ingest"]["release_event_id"]
+    opportunity_id = result["opportunity"]["opportunity_id"]
+    send_result = asyncio.run(
+        _send_to_discord(result["embed"], channel_id, event_id, opportunity_id, args.interaction_wait_seconds)
+    )
 
     if send_result.get("ok"):
         print(f"[ OK ] 送信成功: message_id={send_result['message_id']} channel_id={send_result['channel_id']}")
         print(f"        {send_result.get('jump_url', '')}")
+        if "interaction_count" in send_result:
+            print(f"        受信したInteraction数: {send_result['interaction_count']}")
     else:
         print(f"[ NG ] 送信失敗: {send_result.get('error')}")
 

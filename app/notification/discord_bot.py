@@ -27,10 +27,19 @@ class NotificationService:
     def __init__(self, client: discord.Client) -> None:
         self._client = client
 
-    async def send_opportunity_notification(self, channel_id: int, embed_dict: dict) -> discord.Message:
+    async def send_opportunity_notification(
+        self, channel_id: int, embed_dict: dict, view: discord.ui.View | None = None
+    ) -> discord.Message:
+        """viewを渡すとOpportunityActionView(応募済み/ウォッチ/非表示ボタン、
+        app/notification/interaction_view.py)をメッセージに添付できる。
+
+        2026-08-05発覚: 本来ここでviewを渡す設計だったが(実装仕様書14章)、
+        呼び出し側もこの引数自体も無く、ボタン付きメッセージが一度も送信された
+        ことが無かった(ゲートウェイ実接続検証時に判明)。
+        """
         channel = self._client.get_channel(channel_id) or await self._client.fetch_channel(channel_id)
         embed = discord.Embed.from_dict(_strip_none_values(embed_dict))
-        return await channel.send(embed=embed)
+        return await channel.send(embed=embed, view=view)
 
 
 def _strip_none_values(embed_dict: dict) -> dict:

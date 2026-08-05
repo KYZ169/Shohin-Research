@@ -295,4 +295,17 @@
 - CLIで実データ(新規Product 2件→NEEDS_REVIEW発生→confirm解決→マージ確認)を実際に動かして動作確認済み。テストはunit 165件+integration 49件(既存37+新規12: マージ処理7件・API層5件)全pass。
 
 **別タスクとして記録(今回のスコープ外)**: Discord操作(応募済み/ウォッチ/非表示/今回追加したマージ確定API)には権限チェックが一切無い。個人利用の現段階では実害は小さいが、複数ユーザー対応(Phase5)までに必ず対応が必要(CLAUDE.md 3節に記録)。
-- 全体テスト195件(unit 165 + integration 30)全pass。
+
+## 7. Discordゲートウェイ実接続・ボタン動作検証の準備(2026-08-05)
+
+タスク16(Discord Bot Interaction実装)は「実装済み」扱いだったが、実際にはボタン付きメッセージが一度も送信されたことが無かったことが判明した。原因は2つ:
+
+1. `NotificationService.send_opportunity_notification()`が`view`引数を受け取らず、常にEmbedのみを送信していた(`OpportunityActionView`を渡す経路自体が無かった)。
+2. `scripts/verify_live_e2e.py`の`_OneShotClient`は`on_ready`で送信した直後に`self.close()`しており、Interaction(ボタン押下)を受信する前に切断していた。
+
+以下を修正し、実際にゲートウェイ接続→Embed+ボタン付きメッセージ送信まで実機で確認した(`on_ready`ログでBotのユーザー名/IDが表示され、`message_id`/`jump_url`が返ることを確認済み)。
+
+- `app/notification/discord_bot.py`: `send_opportunity_notification(channel_id, embed_dict, view=None)`にview引数を追加。
+- `scripts/verify_live_e2e.py`: `--interaction-wait-seconds N`オプションを追加。N>0のとき、送信後もN秒間Botの接続を維持し、その間に届いたInteractionを`on_interaction`でログ出力する(custom_id・押した人・component_typeを表示)。`client.start()`を`asyncio.ensure_future`でタスク化し、`on_ready`発火とstart_task自体の異常終了(LoginFailure等)を`asyncio.wait(..., return_when=FIRST_COMPLETED)`で競合させる構成に変更(以前の「`client.start()`全体を単純に30秒でtimeout`」という書き方だと、待機時間を延ばした際に接続自体が30秒で強制終了してしまうため)。
+- 実際に`--interaction-wait-seconds 0`(疎通確認のみ)・`15`(待機ロジック確認)の両方で実行し、正常終了・"Unclosed connector"警告の再発無しを確認済み。ボタンを実際に押しての検証(応募済み/ウォッチ/非表示それぞれの反応・DB反映確認)はユーザー自身がスマホのDiscordアプリで行う手順として`docs/live_verification_guide.md`「6. ボタンの実接続検証」に整備した(ボタンのコールバックがFastAPI(`api`サービス、`http://localhost:8001`)を叩くため、db/redis/worker/beatに加えて`api`サービスも起動しておく必要がある点を明記)。
+- 全体テスト(unit 165 + integration 42)は無影響で全pass。
