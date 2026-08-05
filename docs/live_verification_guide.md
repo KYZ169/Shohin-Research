@@ -224,10 +224,13 @@ tmux kill-session -t verify
 これまで`scripts/verify_live_e2e.py`はEmbedを送信した直後にBotを切断していたため、
 ボタン付きメッセージが一度も送信されておらず、押しても反応しない状態だった
 (`app/notification/discord_bot.py`にボタン(View)を渡す経路自体が無かった)。
-これを修正し、`--interaction-wait-seconds`オプションで送信後もBotの接続を維持して
-ボタン操作を受信できるようにした。
 
-### 事前準備: FastAPIも起動しておく
+これを踏まえ、ボタン検証の方法を2つ用意している。**「時間を気にせずボタンを押したい」場合は
+6-A(常時起動Bot)を使うこと。** 6-Bは`--interaction-wait-seconds`で指定した秒数だけしか
+待たない使い捨て検証のため、スマホでの画面切り替えに手間取ると間に合わないことがある
+(実際に発生した)。
+
+### 事前準備: FastAPIも起動しておく(6-A/6-B共通)
 
 ボタンのコールバックは`app/notification/interaction_view.py`経由で
 `api`サービス(FastAPI、`http://localhost:8001`)を叩く。`docker compose up -d`で
@@ -240,7 +243,74 @@ docker compose up -d
 curl -s http://localhost:8001/health   # {"status":"ok"} が返ればOK
 ```
 
-### 実行
+---
+
+### 6-A. 推奨: 常時起動Bot(`app/bot/main.py`)経由での検証(時間制限なし)
+
+`bot`サービスはworker/beatと同様に`docker-compose.yml`で`restart: unless-stopped`管理される、
+ゲートウェイへ**常時接続し続ける**Discord Botプロセス。一度起動すれば、通知が送られてから
+何時間後にボタンを押しても普通に反応する(締め切りが無い)。
+
+#### 起動
+
+```bash
+cd ~/Shohin-Research
+docker compose up -d --build bot
+```
+
+#### ログ確認(接続確認)
+
+```bash
+docker compose logs bot
+# または追従表示
+docker compose logs -f bot
+```
+
+以下が出ていれば接続成功:
+
+```
+bot-1  | ... discord.gateway Shard ID None has connected to Gateway (Session ID: ...)
+bot-1  | [ OK ] Discordゲートウェイへ接続しました(user=<Bot名>#<番号>, id=<BotのユーザーID>)
+```
+
+#### テスト通知を1回送る
+
+`bot`サービスは既定では自動送信しない(`restart: unless-stopped`によるクラッシュループ時に
+重複送信されるのを防ぐため)。テスト通知を送りたいときは、`docker-compose.yml`の`bot`サービスの
+`command:`に一時的に`--send-test-notification`を追加してから起動し直す:
+
+```yaml
+  bot:
+    ...
+    command: python -u -m app.bot.main --send-test-notification
+```
+
+```bash
+docker compose up -d --build bot
+docker compose logs bot   # [test通知][ OK ] 送信成功: message_id=... が出れば送信完了
+```
+
+送信を確認したら、**押し終わるまでは`command:`を元(`--send-test-notification`無し)に戻さないこと。**
+discord.pyのView(ボタン)はcustom_idを明示していない現状の実装では、Botプロセスを再起動すると
+その時点で送信済みのメッセージのボタンが反応しなくなる(Viewの登録がプロセスのメモリ上にしか
+残らないため、再起動すると失われる。custom_idを固定して`bot.add_view()`で永続化する対応は
+別途必要、CLAUDE.md 3節に記録)。ボタンでの検証が全部終わってから、`command:`を
+`python -u -m app.bot.main`(フラグ無し)に戻して`docker compose up -d --build bot`すれば良い。
+
+#### 停止
+
+```bash
+docker compose stop bot
+```
+
+完全に削除する場合は`docker compose down`(他サービスも含めて全部止まる。詳細は「4. クリーンアップ手順」参照)。
+
+---
+
+### 6-B. 代替: 使い捨てスクリプト(`verify_live_e2e.py`)での検証(時間制限あり)
+
+素早く1回だけ試したい場合はこちらでも良いが、指定した秒数を過ぎるとBotが切断され、
+以降ボタンを押しても反応しなくなる点に注意。
 
 tmuxセッションの中で、`--interaction-wait-seconds`に「ボタンを押すまでの待ち時間(秒)」を
 指定して実行する(120〜300秒程度を推奨。スマホでDiscordアプリを開く時間を見込む)。
@@ -264,7 +334,7 @@ sleep 10
 cat discord_verify_log.txt   # on_readyのログが出ていれば接続成功
 ```
 
-### ログの見方
+### ログの見方(6-B)
 
 以下の行が出れば、ゲートウェイへの実接続に成功している(discord.pyの`on_ready`相当):
 
@@ -292,10 +362,11 @@ cat discord_verify_log.txt   # on_readyのログが出ていれば接続成功
   待機終了。受信したInteraction数: 2
 ```
 
-### 3ボタンそれぞれの確認手順
+### 3ボタンそれぞれの確認手順(6-A/6-B共通)
 
-送信されたメッセージには以下3つのボタンが付いている。**1回の実行で3つとも試したい場合は、
---interaction-wait-secondsを長め(300秒程度)にしておくと余裕を持って全部押せる。**
+送信されたメッセージには以下3つのボタンが付いている。6-Bを使う場合、1回の実行で3つとも
+試したいなら`--interaction-wait-seconds`を長め(300秒程度)にしておくと余裕を持って全部押せる
+(6-Aなら時間を気にする必要はない)。
 
 | ボタン | 押した後の見た目 | 裏側の確認方法(任意) |
 |---|---|---|
@@ -309,10 +380,10 @@ cat discord_verify_log.txt   # on_readyのログが出ていれば接続成功
 原因を追うには`docker compose logs api`(または`api`をローカルのvenvで直接動かしている場合は
 そのターミナル出力)を確認すること。
 
-### 同じメッセージに何度もボタンを押した場合の挙動
+### 同じメッセージに何度もボタンを押した場合の挙動(6-A/6-B共通)
 
 - 「応募済みにする」「ウォッチリスト登録」は冪等(同じ組み合わせなら2回目以降もエラーにならず
   既存の行がそのまま返る)。
 - 「非表示」を一度押すとメッセージ自体が書き換わりボタンが消えるため、同じメッセージに対して
-  再度押すことはできない(再検証したい場合は`verify_live_e2e.py`をもう一度実行して
-  新しいメッセージを送る)。
+  再度押すことはできない(再検証したい場合は、6-Aならテスト通知をもう一度送る、6-Bなら
+  `verify_live_e2e.py`をもう一度実行して新しいメッセージを送る)。

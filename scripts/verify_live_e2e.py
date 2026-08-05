@@ -26,6 +26,16 @@ Discordアプリで確認するところまで自動化する。
 前提: docker composeでdb/redisが起動済み、Celery worker/beatが起動済みであること
 (scripts/verify_live_e2e.sh が一式まとめて行う。単体でも使えるようにこのスクリプトは
 独立して動く)。
+
+【app/bot/main.py(常時起動Bot)との役割の違い(2026-08-05追加、混同防止)】
+本スクリプトは**使い捨ての単発検証専用**のまま維持する。1回だけパイプラインを
+実行してDiscordへ送信し、送信直後(または`--interaction-wait-seconds`指定時は
+その秒数後)にBotを切断する設計は変更しない。
+
+ボタン(応募済み/ウォッチ/非表示)を「時間を気にせず」検証したい場合は、本スクリプトの
+`--interaction-wait-seconds`で無理に長時間待つのではなく、`app/bot/main.py`
+(worker/beatと同様にdocker-composeで`restart: unless-stopped`常時稼働するBot)を
+使うこと。`docs/live_verification_guide.md`「6. ボタンの実接続検証」参照。
 """
 
 from __future__ import annotations

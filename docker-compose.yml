@@ -78,5 +78,23 @@ services:
     volumes:
       - ./app:/app/app
 
+  # 常時起動Discord Bot(2026-08-05追加、app/bot/main.py参照)。
+  # scripts/verify_live_e2e.py(使い捨ての単発検証専用)とは別物で、worker/beatと
+  # 同様にrestart: unless-stoppedでゲートウェイへ常時接続し続ける。
+  # -uはdocker compose logsでの出力遅延(stdoutのブロックバッファリング)を防ぐため。
+  bot:
+    build: .
+    restart: unless-stopped
+    command: python -u -m app.bot.main
+    env_file:
+      - .env
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./app:/app/app
+
 volumes:
   postgres_data:
