@@ -173,3 +173,26 @@ async def test_hide_button_reports_failure_for_unknown_opportunity(release_event
     assert "処理に失敗しました" in args[0]
     assert kwargs.get("ephemeral") is True
     interaction.response.edit_message.assert_not_awaited()
+
+
+async def test_mark_applied_reports_connection_error_instead_of_silently_failing(release_event):
+    """2026-08-05実機検証で発見: app/bot/main.py(常時起動Bot)からapi_base_urlの
+    旧デフォルト値で到達できないAPIを叩いた際、httpx.ConnectErrorがinteraction.response
+    呼び出し前に飛び、Discord側が「応答しませんでした」になっていた。到達不可能な
+    api_base_urlを指定しても、必ずinteraction.response.send_messageが呼ばれる
+    (Discordのinteractionを応答無しのまま失敗させない)ことを確認する。
+    """
+    event, _product = release_event
+    # 到達不能なポート(何もlistenしていない)を指定し、ConnectErrorを確実に発生させる。
+    view = OpportunityActionView(
+        event_id=str(event.id), opportunity_id="unused", api_base_url="http://localhost:1"
+    )
+    interaction = _mock_interaction(5000)
+
+    await view.mark_applied.callback(interaction)
+
+    interaction.response.send_message.assert_awaited_once()
+    args, kwargs = interaction.response.send_message.call_args
+    assert "処理に失敗しました" in args[0]
+    assert "API接続エラー" in args[0]
+    assert kwargs.get("ephemeral") is True

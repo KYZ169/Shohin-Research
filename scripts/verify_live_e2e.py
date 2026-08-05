@@ -192,7 +192,15 @@ async def _send_to_discord(
             try:
                 service = NotificationService(client)
                 view = OpportunityActionView(
-                    event_id=event_id, opportunity_id=opportunity_id, timeout=interaction_wait_seconds or None
+                    event_id=event_id,
+                    opportunity_id=opportunity_id,
+                    # このスクリプトはホスト(venv)から直接実行される前提のため、
+                    # OpportunityActionViewの既定値(docker-compose内部のapiサービス名、
+                    # app/bot/main.py等コンテナ内実行向け)ではなく、ホストから
+                    # 到達できるhttp://localhost:8001を明示する
+                    # (app/notification/interaction_view.pyモジュールdocstring参照)。
+                    api_base_url="http://localhost:8001",
+                    timeout=interaction_wait_seconds or None,
                 )
                 message = await service.send_opportunity_notification(channel_id, embed_dict, view=view)
                 send_result["ok"] = True
