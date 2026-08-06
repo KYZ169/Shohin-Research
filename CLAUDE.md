@@ -238,6 +238,7 @@
 | 19 | 手動検証専用E2Eタスク(`run_live_e2e_verification`)実装(収集→DB反映→商品照合→Profit Engine→Opportunity→通知判定) | 本ファイル7〜9節 | ✅ 完了（Beat Scheduleには未登録の手動検証専用タスク。合成MarketObservationを使用） |
 | 20 | 定期実行タスク(`run_ichiban_kuji_collector`/`run_suruga_ya_price_rising_scan`)のDB反映・Opportunity生成・通知判定への結線 | 本ファイル12節 | ✅ 完了（タスク13・19の既存関数をそのまま呼び出す形で結線。実データで新商品発見→DB反映→Opportunity生成→Discord送信までの一気通貫を実機確認済み。詳細は12節参照） |
 | 21 | ポケモンセンターオンライン新商品一覧ページの発見・商品コード自動抽出(段階1、DB反映・Beat Schedule登録は含まず) | 本ファイル13節 | ✅ 完了（段階1のみ。`discover_new_products()`実装、Fixture2種(一覧275件+個別1件)によるテスト5件追加、全て実データ検証済み。段階2(Beat Schedule登録・DB反映)は別タスクとして依頼待ち、詳細は13節参照） |
+| 22 | ポケモンセンターオンラインのBeat Schedule登録・DB反映結線(段階2)、駿河屋との突合・通知到達確認、重複防止の実データ比較検証 | 本ファイル14節 | ✅ 完了（`run_pokemon_center_collector`追加・6時間毎で登録、本番実機トリガーでProduct/ReleaseEvent 275件を実際にDB反映(success_count=275, error_count=0)、`run_suruga_ya_price_rising_scan`との突合で実際に1件のOpportunity生成・should_send=Trueまで到達(実Discord送信は保留、ユーザー確認待ち)。JAN識別子ありの270件は商品名が変わってもAUTO_MATCHを維持し一番くじより重複防止が強いことを実データで確認、識別子無し5件は一番くじと同じ限界を引き継ぐことも確認。詳細は14節参照） |
 
 **タスク7・8の分離について**: 当初「タスク7 = Product Matcher実装（地域解決ロジック含む）」と
 一つにまとめていたが、実装仕様書Prompt 4が地域解決ロジックのみを指しているのに対し、
@@ -458,3 +459,37 @@
 - **基底クラスとの整合性についての設計判断**: `SourceCollector.run()`は「1URL=1回のfetchでParsedItemが得られる」単層設計だが、ポケセンの新商品一覧ページには「各種期間」(締切・当選発表・購入期限、このCollectorの存在意義そのもの)が無く、商品ごとに個別ページへの追加fetchが必要(2段階)。そのため`parse()`はこのURLに対して意図的に空リストを返し(誤ってrun()経由で不完全なParsedItemが生成されるのを防ぐ)、実際の発見・取得は新設した`discover_new_products()`で行う設計にした。タスク20で`run_ichiban_kuji_collector`が`collector.run()`に頼らず専用ループを組んだ(12節)のと同じ考え方であり、段階2でBeat Schedule結線する際も同様の専用ループを想定している。
 - **実データでの検証**: 実際に取得した生HTML(`tests/fixtures/raw_html/raw_pokemon_center_new_product_list.html`、275件)・個別ページ1件(`raw_pokemon_center_new_product_list_sample_detail.html`、一覧発見分のコード`4521329413075`)をFixtureとして追加し、既存の`parse()`にコード変更無しで実データが正しく通ることを確認した上でテストを書いた。新規テスト5件追加(unit 29件中)、`fetch()`のホワイトリストガード・`extract_new_product_codes()`の275件抽出・`discover_new_products()`のオーケストレーション(モックしたfetch()で実通信無しに検証)を含む。全体テストは250件(unit+integration)全pass。
 - **段階2として別途依頼予定(このタスクでは対応しない)**: Beat Scheduleへの登録、`ingest_normalized_item()`等へのDB反映結線。275件を毎回individual fetchするのは実行コストが高いため、段階2では「DB未登録の新規コードのみfetchする」等の差分化の検討も必要(モジュールdocstring参照、現時点では未対応)。
+
+## 14. ポケモンセンターオンラインのBeat Schedule登録・DB反映結線(段階2)・実機検証(2026-08-06、タスク22)
+
+13.3節の段階1を受けて、ユーザー指示によりBeat Schedule登録・DB反映結線・実機検証まで進めた。
+
+### 14.1 実装内容
+
+- `app/scheduler/celery_app.py`の`beat_schedule`に`pokemon-center-online-every-6-hours`(6時間毎、一番くじと同じ間隔)を追加した。
+- `app/scheduler/tasks.py`に`run_pokemon_center_collector()`を追加した。設計は`run_ichiban_kuji_collector()`(タスク20)を完全に踏襲する: `discover_new_products()`(段階1)の結果を`ingest_normalized_item()`(タスク13、変更無し)でDBへ反映するのみで、Opportunity生成・通知判定はここでは行わない(ポケセンも仕入れ側(SourceCollector)で相場データを持たないため、相場側`run_suruga_ya_price_rising_scan`が`match_observation_to_product()`で突き合わせた時点で自然に行われる、一番くじと同じ結合点)。
+- **実装中に発見・修正した堅牢性の欠落**: 段階1の`discover_new_products()`は275件中1件でもFetchError/ParseErrorが起きると全体が失敗する設計だった(個別ページのtry/exceptが無かった)。275件規模の巡回では一部の商品が終売等で個別に失敗することが実運用で起こりうるため、コードごとにtry/exceptで捕捉し処理を継続する形に修正した(戻り値を`list[NormalizedItem]`から`(list[NormalizedItem], list[str])`のタプルに変更)。単体テスト2件(全件成功/一部失敗で継続)で確認済み。
+- `tests/unit/test_scheduler.py`の`_block_real_network_access`(autouse fixture)に`PokemonCenterOnlineCollector.fetch`のmonkeypatchを追加した(12節の事故の教訓、CLAUDE.md 13.2節参照。新しいCollectorをtest_scheduler.pyで検証する際は必ずこのガードに追加すること)。
+
+### 14.2 本番実機検証結果
+
+`worker`/`beat`コンテナを再起動して反映後、`worker`コンテナ内で`run_pokemon_center_collector()`を直接呼び出した。
+
+- **DB反映**: `success_count=275, error_count=0, ingested_count=275`。Source「ポケモンセンターオンライン」・Product 275件・ReleaseEvent 275件が実際にDBへ反映されたことを確認した(全件、失敗0件)。うち270件は商品コード先頭2桁が45/49でJAN識別子が`product_identifiers`へ永続化され、残り5件(Nintendo Switch本体同梱版等、"99"始まり等)はJANを持たない。
+- **駿河屋との突合・通知到達確認**: 続けて`run_suruga_ya_price_rising_scan()`を手動トリガーした(既存の巡回キーワードに元々「ポケモンカード」が含まれていたため、コード変更無しでポケセン産のProductとも自然にマッチする設計になっていた)。実際に1件のOpportunityが生成され(「【抽選販売】ポケモンカードゲーム MEGA スターターセットex イーブイex構築デッキ」、仕入価格¥1,800)、`evaluate_notification()`が`should_send=True`と判定、Discord Embed(dict)が正しく組み立てられるところまで実データで確認した。**実際のDiscordへの送信(message_id取得)は今回行っていない**(3節に記録済みの「Discord自動送信の仕組みが未実装」という既存の制約と同じ理由で、常時起動Botが`pending_notifications`を自動で拾って送るルートはまだ無い。手動でscripts/verify_live_e2e.py相当の送信を行うかはユーザー判断待ち)。
+  - この1件のEmbedでも既知バグ(3節「`evaluate_notification()`の最良売却先表示バグ」)が同様に再現することを確認した:「最良売却先」欄が仕入先と同じ「ポケモンセンターオンライン」になっている(修正はしていない、既存の記録通り)。
+  - 想定利益は¥-500(マイナス)だった。これは実際の駿河屋買取価格が仕入価格を下回る組み合わせがたまたま拾われたことによる実データであり、Profit Engineの不具合ではない。
+- **重複防止の実データ比較検証(①との対比、ユーザー依頼)**: `tests/integration/test_pokemon_center_recollection_dedup.py`を新規追加し、実データ275件に対して3パターンを検証した。
+  1. 275件全件の同一内容再収集がAUTO_MATCH/HIGH_PROBABILITY_MATCHとなり、Product/ReleaseEventとも増えないことを確認(①の一番くじ32件検証と同じ形)。
+  2. JAN識別子を持つ商品(270/275件)は、商品名を全く別物に変えてもJAN一致(+100)によりAUTO_MATCHを維持することを確認した。**一番くじ(識別子なし、商品名が変わると即NEEDS_REVIEW)と比べて明確に重複防止が強い。**
+  3. 一方、識別子を持たない5件(Nintendo Switch本体同梱版等)は、全角スペース1文字程度の軽微な表記ゆれでも一番くじと全く同じくNEEDS_REVIEWへ落ちることを確認した。**「ポケセンは常に一番くじより重複防止が強い」は正確ではなく、実際には「JAN識別子を取得できた商品(270/275件、98%)に限り強い」というのが正確な理解。**
+
+### 14.3 テスト
+
+unit/integration合わせて257件全pass(既存250 + `test_scheduler.py`拡張3件 + `discover_new_products()`堅牢性2件 + `test_pokemon_center_recollection_dedup.py`3件)。
+
+### 14.4 別タスクとして記録(今回のスコープ外)
+
+- 275件全件を毎回individual fetchする実行コスト(13.3節から継続): 差分化の検討は未着手。
+- Discord自動送信の仕組みが未実装(3節に記録済みの既存課題、ポケセンにも同様に当てはまる)。
+- `evaluate_notification()`の「最良売却先」表示バグ(3節に記録済み、ポケセンのデータでも再現を確認しただけで修正はしていない)。

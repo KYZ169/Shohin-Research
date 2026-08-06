@@ -18,6 +18,15 @@ collector_runsテーブルへのログ記録のみで、products/release_events/
 (suruga_ya)がマッチした時点で行う設計とした(そこが自然な結合点であり、
 一番くじCollector自身がsuruga_yaを検索しにいく必要が無い)。
 
+【ポケモンセンターオンラインの追加(2026-08-06、タスク22・段階2)】
+run_pokemon_center_collector()を追加した。一番くじと同じ仕入れ側(SourceCollector)の
+性質のため、設計は完全にrun_ichiban_kuji_collector()を踏襲する(ingest_normalized_item()
+のみ、Opportunity生成・通知判定はsuruga_ya側の自然な結合点に委ねる)。相違点は
+収集の入口がcollector.target_urlsの単層ループではなく、discover_new_products()
+(app/collectors/sources/pokemon_center_online.py、一覧ページ→商品コード抽出→
+個別ページ275件のfetch_product()という2段階の収集)である点のみ。beat_scheduleにも
+一番くじと同じ6時間間隔で登録した(app/scheduler/celery_app.py)。
+
 【手動検証専用タスクについて(タスク19)】
 run_live_e2e_verification()はタスク20より前から、「収集→DB反映→商品照合→
 Profit Engine→Opportunity生成→通知判定」の一連が実際に動くことをConoHa VPS上で
@@ -49,6 +58,7 @@ from app.collectors.base import CollectorHealth, FetchError, ParseError
 from app.collectors.markets.base import MarketDataType, MarketObservation
 from app.collectors.markets.suruga_ya import SurugaYaCollector
 from app.collectors.sources.ichiban_kuji import IchibanKujiCollector
+from app.collectors.sources.pokemon_center_online import PokemonCenterOnlineCollector
 from app.config import settings
 from app.core.time import JST
 from app.db.models import ManualReviewTask, Opportunity, Product, ReleaseEvent, Shop, Source
@@ -185,6 +195,113 @@ def run_ichiban_kuji_collector() -> dict:
     status = "success" if health in (CollectorHealth.OK, CollectorHealth.DEGRADED) else "failure"
     record_collector_run(
         ICHIBAN_KUJI_TASK_NAME,
+        started_at,
+        status=status,
+        summary=f"health={health.value} success={success_count} error={error_count} ingested={ingested_count}",
+        error_message="; ".join(errors) if status == "failure" and errors else None,
+    )
+    return {
+        "source_name": collector.source_name,
+        "health": health.value,
+        "success_count": success_count,
+        "error_count": error_count,
+        "ingested_count": ingested_count,
+    }
+
+
+POKEMON_CENTER_TASK_NAME = "app.scheduler.tasks.run_pokemon_center_collector"
+
+
+POKEMON_CENTER_SOURCE_COLLECTOR_KEY = "pokemon_center_online"
+
+
+@celery_app.task(name=POKEMON_CENTER_TASK_NAME)
+def run_pokemon_center_collector() -> dict:
+    """6時間に1回、ポケモンセンターオンラインの新商品一覧を巡回する(段階2、2026-08-06)。
+
+    段階1(app/collectors/sources/pokemon_center_online.py:discover_new_products())が
+    新商品一覧ページから商品コードを抽出し、各商品の個別ページをfetch_product()で
+    取得・正規化するところまでを実装済み。本タスクはrun_ichiban_kuji_collector()と
+    同じ設計で、discover_new_products()の結果をingest_normalized_item()(タスク13、
+    変更無し)でDBへ反映する。ポケセンも一番くじと同じく仕入れ側(SourceCollector)で
+    相場データを持たないため、Opportunity生成・通知判定はここでは行わない
+    (相場側のrun_suruga_ya_price_rising_scanが、本タスクにより永続化されたProductと
+    match_observation_to_product()で突き合わせた時点で自然に行われる。モジュール
+    docstring「スコープに関する注記」と同じ結合点)。
+
+    一番くじと異なり、ポケセンは商品コード(13桁)の先頭2桁により条件付きでJANコードを
+    identifiersへ供給する(app/collectors/sources/pokemon_center_online.py参照)ため、
+    重複防止において一番くじより強く効くことが期待される
+    (tests/integration/test_incident_recollection_dedup.pyで確認した一番くじの
+    limitationとの対比、CLAUDE.md 13.1節参照)。
+    """
+    started_at = datetime.now(tz=JST)
+    collector = PokemonCenterOnlineCollector()
+    errors: list[str] = []
+    normalized_items: list = []
+
+    try:
+        normalized_items, discover_errors = asyncio.run(collector.discover_new_products())
+        errors.extend(discover_errors)
+    except (FetchError, ParseError) as exc:
+        errors.append(f"discover_new_products failed: {exc}")
+
+    success_count = 0
+    ingested_count = 0
+    # ichiban_kuji側と同じ理由(モジュールdocstring参照): 取得できたアイテムが1件も
+    # 無い場合はDBセッションを開かない。
+    if normalized_items:
+        session = SessionLocal()
+        try:
+            source = (
+                session.query(Source).filter_by(collector_key=POKEMON_CENTER_SOURCE_COLLECTOR_KEY).one_or_none()
+            )
+            if source is None:
+                source = Source(
+                    name="ポケモンセンターオンライン",
+                    base_url="https://www.pokemoncenter-online.com",
+                    collector_key=POKEMON_CENTER_SOURCE_COLLECTOR_KEY,
+                )
+                session.add(source)
+                session.flush()
+
+            for item in normalized_items:
+                field_errors = collector.validate(item)
+                if field_errors:
+                    errors.append(f"validation failed for '{item.product_name}': {'; '.join(field_errors)}")
+                    continue
+                success_count += 1
+                ingest_normalized_item(session, source, item)
+                ingested_count += 1
+
+            session.commit()
+        except Exception as exc:
+            session.rollback()
+            logger.exception("[pokemon_center_online] DB ingest failed")
+            errors.append(f"ingest failed: {type(exc).__name__}: {exc}")
+            ingested_count = 0
+        finally:
+            session.close()
+
+    error_count = len(errors)
+    if error_count == 0:
+        health = CollectorHealth.OK
+    elif success_count > 0:
+        health = CollectorHealth.DEGRADED
+    else:
+        health = CollectorHealth.FAILING
+
+    logger.info(
+        "pokemon_center_online collector run finished: health=%s success=%d error=%d ingested=%d errors=%s",
+        health.value,
+        success_count,
+        error_count,
+        ingested_count,
+        errors,
+    )
+    status = "success" if health in (CollectorHealth.OK, CollectorHealth.DEGRADED) else "failure"
+    record_collector_run(
+        POKEMON_CENTER_TASK_NAME,
         started_at,
         status=status,
         summary=f"health={health.value} success={success_count} error={error_count} ingested={ingested_count}",

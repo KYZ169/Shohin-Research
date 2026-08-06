@@ -246,8 +246,11 @@ async def test_discover_new_products_fetches_listing_then_each_individual_produc
     """段階1の本体: 一覧ページから商品コードを抽出し、各コードをfetch_product()
     (既存のfetch→parse→normalize)へ渡すところまでを、実データ由来のFixture2種
     (一覧275件+個別ページ1件)を使い、モックしたfetch()で(実通信無しに)検証する。
-    Beat Schedule結線・DB反映はまだ行わない(段階2、モジュールdocstring参照)ため、
-    このテストもDB/Celeryには一切触れない。"""
+    discover_new_products()自身はDB反映やBeat Schedule結線を一切行わない
+    (戻り値は(NormalizedItemのリスト, エラーメッセージのリスト)のみ)ため、
+    このテストもDB/Celeryには一切触れない。実際のBeat Schedule結線・DB反映は
+    段階2でapp/scheduler/tasks.py:run_pokemon_center_collector()側に実装した
+    (tests/unit/test_scheduler.py参照)。"""
     collector = PokemonCenterOnlineCollector()
     monkeypatch.setattr(PokemonCenterOnlineCollector, "rate_limit", lambda self: 0)
 
@@ -265,14 +268,41 @@ async def test_discover_new_products_fetches_listing_then_each_individual_produc
 
     monkeypatch.setattr(collector, "fetch", fake_fetch)
 
-    items = await collector.discover_new_products()
+    items, errors = await collector.discover_new_products()
 
     assert len(items) == 275
+    assert errors == []
     assert requested_urls[0] == NEW_PRODUCT_LIST_URL
     assert len(requested_urls) == 1 + 275  # 一覧1回 + 個別275回
-    # discover_new_products()自身はDB反映やBeat Schedule結線を一切行わない
-    # (戻り値はNormalizedItemのリストのみ)。
     assert all(item.product_name for item in items)
+
+
+async def test_discover_new_products_continues_past_individual_fetch_failures(monkeypatch):
+    """275件規模の巡回では一部の個別ページだけがFetchError/ParseErrorになることが
+    実運用で起こりうる(例: 一覧取得後に商品が終売/URL変更になった等)。1件の失敗で
+    残り274件まで巻き込んで全体を失敗させないことを確認する。"""
+    collector = PokemonCenterOnlineCollector()
+    monkeypatch.setattr(PokemonCenterOnlineCollector, "rate_limit", lambda self: 0)
+
+    listing_html = NEW_PRODUCT_LIST_RAW_HTML_FIXTURE_PATH.read_text(encoding="utf-8")
+    detail_html = NEW_PRODUCT_LIST_SAMPLE_DETAIL_FIXTURE_PATH.read_text(encoding="utf-8")
+    all_codes = collector.extract_new_product_codes(_raw(NEW_PRODUCT_LIST_URL, listing_html))
+    failing_code = all_codes[3]
+
+    async def fake_fetch(target_url: str) -> RawFetchResult:
+        if target_url == NEW_PRODUCT_LIST_URL:
+            return _raw(target_url, listing_html)
+        if failing_code in target_url:
+            raise FetchError(f"{target_url}: 404 (test double)")
+        return _raw(target_url, detail_html)
+
+    monkeypatch.setattr(collector, "fetch", fake_fetch)
+
+    items, errors = await collector.discover_new_products()
+
+    assert len(items) == len(all_codes) - 1
+    assert len(errors) == 1
+    assert failing_code in errors[0]
 
 
 async def test_fetch_product_fetches_parses_and_normalizes_by_product_code(monkeypatch):

@@ -285,26 +285,36 @@ class PokemonCenterOnlineCollector(SourceCollector):
             raise ParseError(f"{raw.url}: 商品コードを1件も抽出できませんでした(構造変更の可能性)")
         return codes
 
-    async def discover_new_products(self) -> list[NormalizedItem]:
+    async def discover_new_products(self) -> tuple[list[NormalizedItem], list[str]]:
         """新商品一覧ページから商品コードを収集し、各商品の個別ページを
         fetch_product()(既存の実装、fetch→parse→normalize)で取得・正規化する
-        (段階1のスコープ、クラスdocstring参照)。
+        (段階1で追加。段階2(2026-08-06)でapp/scheduler/tasks.pyから呼ばれる
+        正式なBeat Schedule結線先になった)。
 
-        Beat Scheduleへの登録・DB反映(ingest_normalized_item()等への結線)は
-        段階2として別途対応する。275件(2026-08-06時点)全件を毎回individual fetch
-        するのはレート制限(rate_limit())込みで実行時間が長くなるため、段階2では
-        「DB未登録の新規コードのみfetchする」等の差分化を検討する必要がある
-        (現時点では未対応)。
+        個別ページの取得は商品ごとに独立して失敗しうる(275件規模の巡回のため、
+        1件のFetchError/ParseErrorで全体を失敗させたくない。一番くじCollectorの
+        target_urlsループ(app/scheduler/tasks.py:run_ichiban_kuji_collector)と
+        同じ考え方)。失敗したコードは(code, エラーメッセージ)としてerrorsに積み、
+        残りのコードの処理を継続する。戻り値は(正常に取得できたNormalizedItemの
+        リスト, エラーメッセージのリスト)。
+
+        275件(2026-08-06時点)全件を毎回individual fetchするのはレート制限
+        (rate_limit())込みで実行時間が長くなるため、将来的には「DB未登録の
+        新規コードのみfetchする」等の差分化を検討する余地がある(現時点では未対応)。
         """
         listing_raw = await self.fetch(NEW_PRODUCT_LIST_URL)
         codes = self.extract_new_product_codes(listing_raw)
 
         items: list[NormalizedItem] = []
+        errors: list[str] = []
         for index, code in enumerate(codes):
             if index > 0:
                 await asyncio.sleep(self.rate_limit())
-            items.append(await self.fetch_product(code))
-        return items
+            try:
+                items.append(await self.fetch_product(code))
+            except (FetchError, ParseError) as exc:
+                errors.append(f"{code}: {exc}")
+        return items, errors
 
     def _parse_product_detail(self, raw: RawFetchResult) -> ParsedItem:
         tree = HTMLParser(raw.html)

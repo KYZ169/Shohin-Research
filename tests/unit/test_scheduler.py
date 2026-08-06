@@ -26,8 +26,14 @@ import pytest
 from app.collectors.base import FetchError
 from app.collectors.markets.suruga_ya import SurugaYaCollector
 from app.collectors.sources.ichiban_kuji import IchibanKujiCollector
+from app.collectors.sources.pokemon_center_online import PokemonCenterOnlineCollector
 from app.scheduler.celery_app import celery_app
-from app.scheduler.tasks import SURUGA_YA_SCAN_KEYWORDS, run_ichiban_kuji_collector, run_suruga_ya_price_rising_scan
+from app.scheduler.tasks import (
+    SURUGA_YA_SCAN_KEYWORDS,
+    run_ichiban_kuji_collector,
+    run_pokemon_center_collector,
+    run_suruga_ya_price_rising_scan,
+)
 
 
 async def _raise_fetch_error(self, target_url: str):
@@ -40,11 +46,16 @@ async def _raise_search_error(self, query: str, identifiers: dict, restrict: lis
 
 @pytest.fixture(autouse=True)
 def _block_real_network_access(monkeypatch):
-    """このファイルの全テストで、実際の1kuji.com/on-line.1kuji.com/suruga-ya.jpへの
-    アクセスを確実に発生させない(モジュールdocstring参照)。DB書き込みを伴う
-    成功パスのテストはtests/integration側の責務とする。"""
+    """このファイルの全テストで、実際の1kuji.com/on-line.1kuji.com/suruga-ya.jp/
+    pokemoncenter-online.comへのアクセスを確実に発生させない(モジュールdocstring参照)。
+    PokemonCenterOnlineCollector.discover_new_products()は内部でself.fetch()を
+    呼ぶ設計(app/collectors/sources/pokemon_center_online.py参照)のため、
+    IchibanKujiCollectorと同じくfetch()自体をmonkeypatchすれば一覧・個別ページの
+    両方への到達を防げる。DB書き込みを伴う成功パスのテストはtests/integration側の
+    責務とする。"""
     monkeypatch.setattr(IchibanKujiCollector, "fetch", _raise_fetch_error)
     monkeypatch.setattr(SurugaYaCollector, "search", _raise_search_error)
+    monkeypatch.setattr(PokemonCenterOnlineCollector, "fetch", _raise_fetch_error)
 
 
 def test_beat_schedule_includes_ichiban_kuji_every_6_hours():
@@ -63,9 +74,18 @@ def test_beat_schedule_includes_suruga_ya_price_rising_scan():
     assert 1 * 24 * 60 * 60 >= entry["schedule"] >= 1 * 60 * 60
 
 
+def test_beat_schedule_includes_pokemon_center_every_6_hours():
+    """CLAUDE.md 13.3節(タスク22): ポケセンは一番くじと同じ6時間に1回。"""
+    entry = celery_app.conf.beat_schedule["pokemon-center-online-every-6-hours"]
+
+    assert entry["task"] == "app.scheduler.tasks.run_pokemon_center_collector"
+    assert entry["schedule"] == 6 * 60 * 60
+
+
 def test_tasks_are_registered_under_expected_names():
     assert "app.scheduler.tasks.run_ichiban_kuji_collector" in celery_app.tasks
     assert "app.scheduler.tasks.run_suruga_ya_price_rising_scan" in celery_app.tasks
+    assert "app.scheduler.tasks.run_pokemon_center_collector" in celery_app.tasks
 
 
 def test_ichiban_kuji_task_handles_network_failure_gracefully():
@@ -95,6 +115,20 @@ def test_suruga_ya_task_handles_network_failure_gracefully():
     assert result["pending_notifications"] == []
 
 
+def test_pokemon_center_task_handles_network_failure_gracefully():
+    """discover_new_products()の最初のfetch(一覧ページ)がFetchErrorになるケース。
+    タスクが例外を漏らさずhealth=failingの結果を返せることを確認する。
+    ichiban_kuji側と同じ理由(モジュールdocstring参照)でDB接続も発生しない。"""
+    with patch("app.scheduler.tasks.record_collector_run"):
+        result = run_pokemon_center_collector()
+
+    assert result["source_name"] == "pokemon_center_online"
+    assert result["health"] == "failing"
+    assert result["success_count"] == 0
+    assert result["error_count"] == 1  # 一覧ページのfetch失敗1件のみ(個別ページには進めない)
+    assert result["ingested_count"] == 0
+
+
 def test_ichiban_kuji_task_records_collector_run_with_correct_task_name():
     """運用整備タスク(Collector稼働状況CLI)向けの記録が、正しいtask_name・statusで
     呼ばれることを検証する。DB書き込みそのものはmockし、呼び出し引数のみ確認する。"""
@@ -116,3 +150,14 @@ def test_suruga_ya_task_records_collector_run_with_correct_task_name():
     args, kwargs = mock_record.call_args
     assert args[0] == "app.scheduler.tasks.run_suruga_ya_price_rising_scan"
     assert kwargs["status"] in {"success", "failure"}
+
+
+def test_pokemon_center_task_records_collector_run_with_correct_task_name():
+    with patch("app.scheduler.tasks.record_collector_run") as mock_record:
+        result = run_pokemon_center_collector()
+
+    mock_record.assert_called_once()
+    args, kwargs = mock_record.call_args
+    assert args[0] == "app.scheduler.tasks.run_pokemon_center_collector"
+    expected_status = "success" if result["health"] in {"ok", "degraded"} else "failure"
+    assert kwargs["status"] == expected_status
