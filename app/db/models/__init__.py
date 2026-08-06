@@ -4,6 +4,7 @@ from app.db.models.collector_run import CollectorRun
 from app.db.models.lottery_entry import LotteryEntry
 from app.db.models.manual_review_task import ManualReviewTask
 from app.db.models.opportunity import Opportunity
+from app.db.models.pending_notification import PendingNotification
 from app.db.models.product import Product, ProductIdentifier
 from app.db.models.profit_snapshot import ProfitSnapshot
 from app.db.models.region import Region
@@ -20,6 +21,7 @@ __all__ = [
     "LotteryEntry",
     "ManualReviewTask",
     "Opportunity",
+    "PendingNotification",
     "Product",
     "ProductIdentifier",
     "ProfitSnapshot",

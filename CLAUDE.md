@@ -239,6 +239,7 @@
 | 20 | 定期実行タスク(`run_ichiban_kuji_collector`/`run_suruga_ya_price_rising_scan`)のDB反映・Opportunity生成・通知判定への結線 | 本ファイル12節 | ✅ 完了（タスク13・19の既存関数をそのまま呼び出す形で結線。実データで新商品発見→DB反映→Opportunity生成→Discord送信までの一気通貫を実機確認済み。詳細は12節参照） |
 | 21 | ポケモンセンターオンライン新商品一覧ページの発見・商品コード自動抽出(段階1、DB反映・Beat Schedule登録は含まず) | 本ファイル13節 | ✅ 完了（段階1のみ。`discover_new_products()`実装、Fixture2種(一覧275件+個別1件)によるテスト5件追加、全て実データ検証済み。段階2(Beat Schedule登録・DB反映)は別タスクとして依頼待ち、詳細は13節参照） |
 | 22 | ポケモンセンターオンラインのBeat Schedule登録・DB反映結線(段階2)、駿河屋との突合・通知到達確認、重複防止の実データ比較検証 | 本ファイル14節 | ✅ 完了（`run_pokemon_center_collector`追加・6時間毎で登録、本番実機トリガーでProduct/ReleaseEvent 275件を実際にDB反映(success_count=275, error_count=0)、`run_suruga_ya_price_rising_scan`との突合で実際に1件のOpportunity生成・should_send=Trueまで到達(実Discord送信は保留、ユーザー確認待ち)。JAN識別子ありの270件は商品名が変わってもAUTO_MATCHを維持し一番くじより重複防止が強いことを実データで確認、識別子無し5件は一番くじと同じ限界を引き継ぐことも確認。詳細は14節参照） |
+| 23 | 【緊急対応】should_send=TrueのOpportunityを常時起動Botが自動的に拾ってDiscordへ送信する仕組みの実装(タスク20〜22の時点でこれが存在せず、収集→通知という当初からの目的そのものが未達成だった) | 本ファイル15節 | ✅ 完了（`pending_notifications`テーブル新設、`_match_and_score_observation()`がshould_send=True時に1行永続化、常時起動Botが15分毎(`app/notification/dispatcher.py`)にポーリングして送信。タスク22で生成された「MEGA スターターセットex イーブイex構築デッキ」のOpportunityが実際にこの経路でDiscordへ送信されたことをmessage_id取得込みで実機確認済み。重複送信防止(status=sent後は二度と拾われない)もテスト・実機の両方で確認。詳細は15節参照） |
 
 **タスク7・8の分離について**: 当初「タスク7 = Product Matcher実装（地域解決ロジック含む）」と
 一つにまとめていたが、実装仕様書Prompt 4が地域解決ロジックのみを指しているのに対し、
@@ -283,7 +284,7 @@
 - ~~on-line.1kuji.com商品一覧の収集結果はDBへ一切反映されない~~ → **解消済み(12節、2026-08-06、タスク20)。駿河屋も含め定期実行タスク2つとも同じ構造的欠落だったことを確認した上で、ingest_normalized_item()/match_observation_to_product()/build_and_score_opportunity()/evaluate_notification()への結線を実施し、実データで新商品発見→DB反映→Opportunity生成→Discord送信までの一気通貫を実機確認済み**
 - **【2026-08-06・新規、タスク20の実機検証で判明】Product Matcherの一番くじ商品に対する商品名類似度が実用上機能していない**: 駿河屋の一番くじ関連リストは「孫悟空＆ブルマ＆クリリン 潜水艇「一番くじ ドラゴンボール EX 対決!レッドリボン軍」D賞 フィギュア」のような個別景品名(シリーズ名を含むがそれ以外の文字列が多い)で出品される。既存の`_title_similarity()`(`SequenceMatcher`による全体文字列の編集距離ベース)ではシリーズ名一致分のスコアが希釈されてしまい、実データ6商品(ゴジラ MACHINE CHRONICLE/ゴジラ 最恐怪獣王列伝/オーバーロード/ジョジョの奇妙な冒険 STEEL BALL RUN/ウルトラマン 60th Anniversary/ドラゴンボール EX 対決！レッドリボン軍)で確認したところ、いずれもNEEDS_REVIEW閾値(40点)未満(score=0〜5)にしかならなかった。改善するなら「観測タイトルがProduct名を部分文字列として含む場合の加点」等が考えられるが、商品照合の確定ロジックに関わる変更のため着手前に協議が必要(CLAUDE.md 0.5)。
 - **【2026-08-06・新規、タスク20の実機検証で判明】`evaluate_notification()`の「最良売却先」表示が仕入れ側Source名になっている**: `app/pipeline/notify.py`の`OpportunityView`構築で`best_channel_name=source.name`となっており、`build_and_score_opportunity()`に渡した実際の売却チャネル名(例:`"suruga_ya"`)が表示に反映されない(仕入先と最良売却先が常に同じ値になる)。今回のタスク(20)とは無関係な既存コードの問題のため修正はしていない。
-- **【2026-08-06・新規、タスク20の実機検証で判明】Discord自動送信の仕組みが未実装**: `run_ichiban_kuji_collector`/`run_suruga_ya_price_rising_scan`はshould_send=Trueのembedを返り値に含めるところまでで、これを常時起動Bot(`app/bot/main.py`)が定期的に取得して実際に送信する仕組みはまだ無い(常時起動Botは現状`--send-test-notification`起動時に1回送るのみ)。新商品が完全に自動でDiscordへ届くには、常時起動Bot側にこれらのタスクの結果を定期的に取得して送信する仕組みが別途必要。
+- ~~【2026-08-06・新規、タスク20の実機検証で判明】Discord自動送信の仕組みが未実装~~ → **緊急対応・解消済み(15節、2026-08-06、タスク23)。`pending_notifications`テーブル新設+常時起動Botの15分毎ポーリング(`app/notification/dispatcher.py`)で解消。これが解消されるまで「収集→通知の自動化」は実質未完成だった(収集はできてもDiscordに一切届かない状態)。**
 - **【2026-08-06・新規、テスト用DBが本番と分離されていない設計上のギャップ】専用のテスト用DBが存在せず、`tests/integration/conftest.py`の`db_session`フィクスチャは本番と全く同じ`app.config.settings.database_url`に接続し、ネストしたトランザクション+rollbackのみで隔離している(接続先そのものは本番DBと同一)。この設計自体はSQLAlchemyの標準的なテスト分離パターンであり、`db_session`を経由する限り安全に機能する(実際、`test_incident_recollection_dedup.py`等はこの隔離のもとで本番の実データに対して安全に検証できている)。**しかし12節の事故の本質はまさにこの前提が崩れたケースだった**: `tests/unit/test_scheduler.py`はCeleryタスク関数を直接呼び出す設計で、`db_session`フィクスチャを一切経由せず、タスク内部が独自にDBセッションを開く(アプリ本体と同じ経路で本番へ直接接続する)。そのためrollback保護の外側で本番へ実際に書き込まれた。**今後も同じ構造のリスクが残っている**: `db_session`を経由しないテスト(Celeryタスクや将来追加されるスクリプト類を直接呼ぶテスト全般)は、書き込みが本番へ確定してしまう経路になりうる。タスク20では該当箇所をnetwork層のmonkeypatchで塞いだ(12節参照)が、これは個別対応であり、同種のテストが今後増えるたびに同じ注意が必要になる。**将来的な検討課題**: `docker-compose.yml`にテスト専用DBサービス(例: `test-db`、本番`db`とは別のPostgreSQLコンテナ+別ボリューム)を追加し、テスト実行時は`DATABASE_URL`をそちらに向ける構成にすれば、rollbackに頼らずコンテナレベルで本番データと完全に分離できる。現時点では未着手(この記録のみ、着手はしていない)。
 - **【2026-08-06・タスク20の事故データ(Product 32件・ReleaseEvent 36件)の再収集時デデュープ検証】** `tests/integration/test_incident_recollection_dedup.py`を追加し、実際に本番DBへ書き込まれたこの36件のReleaseEvent全件について「もう一度同じページを収集したら」を再現して検証した。全件が`match_or_create_product()`のexact_match経路(商品名の完全一致)でAUTO_MATCHとなり既存のProduct/ReleaseEventへ正しく紐づき、Product/ReleaseEventのいずれも増えないことを確認した(再収集前後で32件/36件のまま)。**同時に判明した限界**: 一番くじ商品は識別子(JAN/型番)を持たず(1.1節)、`Product.release_date`もどこからも書き込まれないため、`calc_match_score()`側の名前類似度による加点は理論上の上限が+40点(`NEEDS_REVIEW_THRESHOLD`と同値)にしかならず、AUTO_MATCH(90点)/HIGH_PROBABILITY_MATCH(70点)には**原理的に届かない**。つまり一番くじ商品の重複防止は事実上`match_or_create_product()`のexact_match(文字列完全一致)経路のみに依存しており、fuzzy matching側はこれを一切補完できない。空白のゆれ自体は`_title_similarity()`が事前に空白を除去するため無害だが、それ以外の表記変動(全角/半角、記号の差、サイト側のtitle文言変更等)でexact_matchが外れた場合、確実にNEEDS_REVIEWへ落ちて重複Productが作られる。改善するなら商品照合の確定ロジックに関わる変更のため、着手前に協議が必要(CLAUDE.md 0.5、282行目の駿河屋照合精度の課題と同根)。
 
@@ -424,7 +425,7 @@
 - **副産物として発見した既存バグ**: `app/pipeline/notify.py:evaluate_notification()`の`OpportunityView`構築で、「最良売却先」欄が`best_channel_name=source.name`(仕入れ側のSource名)になっており、`build_and_score_opportunity()`に渡した実際の売却チャネル名(`channel_name`引数、例:`"suruga_ya"`)が表示に反映されない。今回のタスクとは無関係な既存コードの問題のため修正はしていない(3節に記録)。
 
 **別タスクとして記録(今回のスコープ外)**:
-- Discord自動送信の仕組みが未実装: `pending_notifications`(embed)を計算するところまでで、これを常時起動Botが自動的に拾って送信する仕組みはまだ無い(常時起動Botは現状`--send-test-notification`起動時に1回送るのみ)。新商品が完全に自動でDiscordへ届くには、常時起動Bot側にこれらのタスクの結果を定期的に取得して送信する仕組みが別途必要。
+- ~~Discord自動送信の仕組みが未実装~~ → **緊急対応・解消済み(15節、2026-08-06、タスク23)**
 - Product Matcherの一番くじ商品(個別景品タイトル)に対する照合精度: 上記の通り、シリーズ名一致だけでは現状スコアが伸びない。改善するなら例えば「観測タイトルがProduct名を部分文字列として含む場合の加点」等の見直しが考えられるが、商品照合の確定ロジックに関わる変更のため、着手前に協議が必要(CLAUDE.md 0.5)。
 - `evaluate_notification()`の「最良売却先」表示バグ。
 
@@ -491,5 +492,51 @@ unit/integration合わせて257件全pass(既存250 + `test_scheduler.py`拡張3
 ### 14.4 別タスクとして記録(今回のスコープ外)
 
 - 275件全件を毎回individual fetchする実行コスト(13.3節から継続): 差分化の検討は未着手。
-- Discord自動送信の仕組みが未実装(3節に記録済みの既存課題、ポケセンにも同様に当てはまる)。
+- ~~Discord自動送信の仕組みが未実装~~ → **緊急対応・解消済み(15節、2026-08-06、タスク23)。このセクションで生成された「MEGA スターターセットex イーブイex構築デッキ」のOpportunityが、実際にこの仕組みで送信されたことを確認済み。**
 - `evaluate_notification()`の「最良売却先」表示バグ(3節に記録済み、ポケセンのデータでも再現を確認しただけで修正はしていない)。
+
+## 15. 【緊急対応】pending_notifications自動配信の実装(2026-08-06、タスク23)
+
+### 15.1 発覚した欠落の重大性
+
+タスク20〜22で一番くじ/駿河屋/ポケセンの収集→DB反映→商品照合→Opportunity生成→通知判定(`evaluate_notification()`)までは実際に動作することを確認していたが、**`should_send=True`と判定された結果はCeleryタスクの戻り値(dict)に含まれるだけで、これを自動的に拾ってDiscordへ実際に送信する仕組みがどこにも存在しなかった**。常時起動Bot(`app/bot/main.py`)は`--send-test-notification`起動時に1回送るのみで、収集タスクの結果を定期的に取得する経路を持っていなかった。
+
+これは「収集」「照合」「利益計算」「通知要否判定」という個々の要素がいくら正しく動いていても、**最終的にユーザーの手元(Discord)に情報が届かなければ、このツール全体の目的(収集→通知)が達成されない**という意味で、他の未解決課題(駿河屋の照合精度限界、最良売却先表示バグ等)とは性質が異なる致命的な欠落だった。ユーザー指摘により発覚し、最優先で緊急対応した。**この欠落が解消されるまで、一番くじ・駿河屋・ポケセンの自動収集(タスク20〜22)は「動いてはいるが実際には何の役にも立っていない」状態だった。**
+
+### 15.2 設計
+
+- **新テーブル`pending_notifications`**(`app/db/models/pending_notification.py`、マイグレーション`7b788e3dd59e`): `evaluate_notification()`がshould_send=Trueと判定した時点の`embed`(JSONB)・`opportunity_id`・`release_event_id`・`channel_id`・`manual_review_task_id`・`dedupe_key`(監査用)を保存する送信キュー。status(`pending`/`sent`/`failed`)・`attempt_count`・`last_error`で送信状態を追跡する。
+- **書き込み側**: `_match_and_score_observation()`(app/scheduler/tasks.py、駿河屋スキャンから呼ばれる)がshould_send=Trueの都度1行作成する。一番くじ/ポケセンの収集タスクはOpportunity生成自体を行わない設計(12節・14節参照)のため、書き込み箇所はここ1箇所のみ。
+- **読み出し・送信側**: `app/notification/dispatcher.py:dispatch_pending_notifications()`が、status=pendingの行を作成日時の古い順に送信する。send_fn(非同期callable)を呼び出し側から注入する設計にし、実際のDiscordゲートウェイ接続を持たないテストからも検証できるようにした(`app/notification/interaction_view.py`のhttp_client注入と同じ考え方)。
+
+**常時起動Bot側のポーリング(Celery Beatではなくこちらを選んだ理由)**: ユーザーからは「Celery Beatに新タスクとして追加するか、常時起動Bot側で定期チェックするか、実装しやすい方で構わない」と選択の余地を与えられたが、後者を選んだ。理由: `OpportunityActionView`(応募済み/ウォッチ/非表示ボタン等)はcustom_idを永続化しておらず、送信元の`discord.Client`インスタンスが生き続けている間しかボタンが反応しない(3節に既知の制約として記録済み)。Celery Beatタスクが毎回使い捨てのdiscord.Client(`scripts/verify_live_e2e.py`の`_OneShotClient`と同じパターン)で送信→即切断する設計だと、送信直後にボタンが恒久的に無反応になり、タスク9・10で実機確認済みのボタン操作(応募済みにする/ウォッチ/非表示/照合確定/別商品分離)が機能しなくなる。既に常時接続し続けている`app/bot/main.py`が自分自身のイベントループ内で`discord.ext.tasks.loop(minutes=15)`により定期ポーリングする設計にすることで、この問題を避けた。
+
+**ポーリング間隔(15分、ユーザー指定)**: 一番くじ/ポケセン(6時間毎)・駿河屋(12時間毎)という収集タスク自体の巡回間隔とは意図的に独立させている。収集が完了してから通知が届くまでの遅延を「次の収集サイクルまで」ではなく「次のポーリングサイクル(最大15分)まで」に抑えることで、収集できても通知側の取りこぼしで半日近く遅れる機会損失を避ける(ユーザー指定の設計意図)。
+
+**session.commit()の扱い(重要な設計判断)**: `dispatch_pending_notifications()`は行単位で`session.commit()`する(他の多くのモジュールが`session.flush()`のみで呼び出し側にcommitを委ねているのとは意図的に異なる)。理由: 複数行をまとめて処理する際、後続の行の送信で例外が起きてバッチ全体がロールバックされると、「Discordへは実際に送信済みだがDBにはpendingのまま残ってしまう」行が発生し、次回ポーリングで再送(重複送信)してしまう。1メッセージ送信成功の直後に確定させることで、この重複送信を防いでいる。
+
+### 15.3 実装中に検証した安全性(SQLAlchemyのトランザクション境界)
+
+`dispatch_pending_notifications()`が内部で`session.commit()`を呼ぶ設計のため、これを`tests/integration/conftest.py`の`db_session`フィクスチャ(ネストしたトランザクション+rollbackで隔離)経由でテストして安全か(=commit()がrollback保護を突き破って本番へ実際に書き込んでしまわないか)を、実装前に実験して確認した。`connection.begin()`で開始した外側のトランザクションに対し、`sessionmaker(bind=connection)`で作られたセッションの`commit()`は、**別の独立したDB接続からはコミット直後であっても一切見えない**(=DBレベルの実コミットにはならず、外側のトランザクションの範囲内にとどまる)ことを確認した。これにより、`dispatch_pending_notifications()`の内部commitを含む一連の処理を、本番を汚染するリスク無く`db_session`フィクスチャでテストできることが分かった(12節・13.2節の事故の教訓を踏まえた確認)。
+
+### 15.4 テスト
+
+- `tests/integration/test_dispatcher.py`(新規6件): 送信成功時のstatus更新、**重複送信防止の直接確認(1回目のポーリングで送信済みになった行は2回目のポーリングで再送されない)**、送信済み/失敗確定済みの行はスキップされること、1件の失敗が残りの処理をブロックしないこと、max_attempts到達でstatus=failedになりそれ以降二度と拾われないこと、作成日時の古い順に処理されること。
+- `tests/integration/test_pending_notification_creation.py`(新規1件): `_match_and_score_observation()`がshould_send=Trueの際に実際に`pending_notifications`へ1行作成すること、同一内容の再評価(dedupe判定でUNCHANGED)では2件目が積まれないこと(Redis側のdedupeとDB側の配信キューの整合性)。
+- 全体テストは264件全pass。
+
+### 15.5 本番実機検証(2026-08-06)
+
+タスク22で生成済みだった「【抽選販売】ポケモンカードゲーム MEGA スターターセットex イーブイex構築デッキ」のOpportunity(pending_notificationsテーブル新設前に生成されたため、そのままでは配信キューに存在しない)を使い、実際にこの仕組みで送信されるところまで確認した。
+
+1. `worker`コンテナを再起動(新しい`tasks.py`を反映)。
+2. 該当release_eventのRedis dedupeキー(`notification:{release_event_id}`)を削除し、「未通知」の状態に戻した。
+3. `run_suruga_ya_price_rising_scan()`を再実行し、`pending_notifications`へ実際に1行(status=pending)作成されたことをDBで確認した。
+4. `bot`コンテナを再起動。`discord.ext.tasks.loop`は`.start()`直後に即座に1回目を実行する仕様のため、15分待たずに`on_ready`後すぐにポーリングが走った。ログに`[通知配信] checked=1 sent=1 failed=0 errors=[]`が出力され、該当行のstatusが`sent`・`discord_message_id`に実際のメッセージID(`1534818839080992860`)が入ったことをDBで確認した。**実際にDiscordへ送信された。**
+
+**その他の観察事項(参考記録、今回のスコープ外)**: この検証中、`bot`コンテナの再起動のたびに`--send-test-notification`相当の動作(`run_live_e2e_verification`によるテスト通知送信)も毎回発生していることに気づいた。現在の`docker-compose.yml`の`bot`サービスの`command`は`python -u -m app.bot.main`(フラグ無し)だが、実際に稼働中のコンテナは`docker compose restart`ではなく過去に`--send-test-notification`付きで作成されたままの可能性がある(`restart`はコンテナ作成時のcommandを再利用し、compose.ymlの現在の内容を再読み込みしない)。8節の設計意図(「`restart: unless-stopped`によるクラッシュループ時の重複送信を防ぐため、既定では送信しない」)に照らすと、意図せず毎回テスト通知が飛ぶ状態になっている可能性がある。今回のタスクとは無関係のため確認・修正はしていないが、次にBotコンテナに触れる際は`docker compose up -d bot`(再作成)で現在のcompose.ymlのcommandに揃えることを検討する価値がある。
+
+### 15.6 別タスクとして記録(今回のスコープ外)
+
+- 上記「bot再起動のたびにテスト通知が飛んでいる可能性」の確認・是正。
+- `pending_notifications`の運用監視(`failed`件数の可視化。`scripts/collector_status.py`相当のCLIは今回作っていない)。

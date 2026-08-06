@@ -92,3 +92,12 @@ class ManualReviewTaskStatus(str, Enum):
     PENDING = "pending"
     CONFIRMED = "confirmed"  # candidate_productをmatched_productへ統合(マージ)した
     REJECTED = "rejected"  # 別商品と判断し、candidate_productは分離したまま維持
+
+
+class PendingNotificationStatus(str, Enum):
+    """pending_notifications.status(2026-08-06追加、CLAUDE.md「収集→通知の自動化」
+    緊急対応。app/notification/dispatcher.py参照)。"""
+
+    PENDING = "pending"  # 未送信
+    SENT = "sent"  # 送信成功
+    FAILED = "failed"  # 送信を試みたがmax_attempts到達、これ以上リトライしない

@@ -39,11 +39,16 @@ scripts/verify_live_e2e.pyからの手動triggerのみを想定する。
 タスクの中では行わない。Celeryタスクは同期実行モデルが基本であり、discord.pyの
 非同期ゲートウェイ接続と相性が悪いため、意図的に分離している。should_send=Trueの
 ものはembed(dict、JSON化可能)を返り値に含めるところまでとし、実送信は呼び出し側
-(常時起動Bot等、discord.Clientを持つ別プロセス)が担当する。**この「実送信を
-自動的に拾って送る仕組み」自体はタスク20の時点でまだ存在しない(常時起動Botは
-現状--send-test-notification起動時に1回送るのみ)。新商品が実際に自動でDiscordへ
-届くには、常時起動Bot側にこれらのタスクの結果を定期的に取得して送信する仕組みを
-別途実装する必要がある(CLAUDE.md 3節に記録)。**
+(常時起動Bot等、discord.Clientを持つ別プロセス)が担当する。
+
+【2026-08-06・緊急対応(タスク23)で解消】上記の「実送信を自動的に拾って送る仕組み」
+自体がタスク20〜22の時点で存在せず、should_send=Trueの結果はタスクの戻り値(Celeryの
+結果バックエンド、TTLで消える)に含まれるだけで、誰にも消費されずに失われていた。
+これは収集→通知という当初からの目的そのものに関わる欠落だったため緊急対応した。
+`_match_and_score_observation()`がshould_send=Trueと判定した時点で
+`pending_notifications`テーブル(app/db/models/pending_notification.py)へ1行永続化し、
+常時起動Bot(app/bot/main.py)が15分毎(`app/notification/dispatcher.py`)にこれを
+ポーリングして実際に送信する。詳細はCLAUDE.md 15節参照。
 """
 
 import asyncio
@@ -61,7 +66,7 @@ from app.collectors.sources.ichiban_kuji import IchibanKujiCollector
 from app.collectors.sources.pokemon_center_online import PokemonCenterOnlineCollector
 from app.config import settings
 from app.core.time import JST
-from app.db.models import ManualReviewTask, Opportunity, Product, ReleaseEvent, Shop, Source
+from app.db.models import ManualReviewTask, Opportunity, PendingNotification, Product, ReleaseEvent, Shop, Source
 from app.db.session import SessionLocal
 from app.domain.enums import ManualReviewTaskStatus, MatchStatus
 from app.pipeline.ingest import ingest_normalized_item
@@ -377,12 +382,30 @@ def _match_and_score_observation(
             target_prefectures=set(),
         )
         if decision.should_send:
+            manual_review_task_id = _pending_manual_review_task_id(session, build_result.opportunity)
+            # 2026-08-06(緊急対応): should_send=Trueの結果をタスクの戻り値に含めるだけでは
+            # 誰も自動的に拾って送信しない(常時起動Botが定期的に取得して送信する仕組みが
+            # 存在しなかった、CLAUDE.md参照)。pending_notificationsへ永続化し、
+            # app/notification/dispatcher.py:dispatch_pending_notifications()が
+            # 常時起動Bot側から定期的に拾って送信する設計にした。
+            session.add(
+                PendingNotification(
+                    opportunity_id=build_result.opportunity.id,
+                    release_event_id=release_event.id,
+                    channel_id=settings.discord_notify_channel_id,
+                    embed=decision.embed,
+                    manual_review_task_id=manual_review_task_id,
+                    dedupe_key=decision.dedupe_result.dedupe_key if decision.dedupe_result else None,
+                    created_at=datetime.now(tz=JST),
+                )
+            )
+            session.flush()
             results.append(
                 {
                     "release_event_id": str(release_event.id),
                     "product_name": matched_product.name,
                     "opportunity_id": str(build_result.opportunity.id),
-                    "manual_review_task_id": _pending_manual_review_task_id(session, build_result.opportunity),
+                    "manual_review_task_id": manual_review_task_id,
                     "embed": decision.embed,
                 }
             )
