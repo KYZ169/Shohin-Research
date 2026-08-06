@@ -534,9 +534,11 @@ unit/integration合わせて257件全pass(既存250 + `test_scheduler.py`拡張3
 3. `run_suruga_ya_price_rising_scan()`を再実行し、`pending_notifications`へ実際に1行(status=pending)作成されたことをDBで確認した。
 4. `bot`コンテナを再起動。`discord.ext.tasks.loop`は`.start()`直後に即座に1回目を実行する仕様のため、15分待たずに`on_ready`後すぐにポーリングが走った。ログに`[通知配信] checked=1 sent=1 failed=0 errors=[]`が出力され、該当行のstatusが`sent`・`discord_message_id`に実際のメッセージID(`1534818839080992860`)が入ったことをDBで確認した。**実際にDiscordへ送信された。**
 
-**その他の観察事項(参考記録、今回のスコープ外)**: この検証中、`bot`コンテナの再起動のたびに`--send-test-notification`相当の動作(`run_live_e2e_verification`によるテスト通知送信)も毎回発生していることに気づいた。現在の`docker-compose.yml`の`bot`サービスの`command`は`python -u -m app.bot.main`(フラグ無し)だが、実際に稼働中のコンテナは`docker compose restart`ではなく過去に`--send-test-notification`付きで作成されたままの可能性がある(`restart`はコンテナ作成時のcommandを再利用し、compose.ymlの現在の内容を再読み込みしない)。8節の設計意図(「`restart: unless-stopped`によるクラッシュループ時の重複送信を防ぐため、既定では送信しない」)に照らすと、意図せず毎回テスト通知が飛ぶ状態になっている可能性がある。今回のタスクとは無関係のため確認・修正はしていないが、次にBotコンテナに触れる際は`docker compose up -d bot`(再作成)で現在のcompose.ymlのcommandに揃えることを検討する価値がある。
+~~**その他の観察事項(参考記録、今回のスコープ外)**: この検証中、`bot`コンテナの再起動のたびに`--send-test-notification`相当の動作(`run_live_e2e_verification`によるテスト通知送信)も毎回発生していることに気づいた。~~ → **確認・是正済み(2026-08-06)。`docker compose up -d bot`(`restart`ではなく再作成)を実行し、`docker inspect`でコンテナの実際のcommandが`[python -u -m app.bot.main]`(フラグ無し、現在のdocker-compose.ymlと一致)になっていることを確認した。再作成後の起動ログに`[test通知]`の出力は一切無く(該当行数0を確認)、意図しないテスト通知の再送信は解消された。8節で意図していた「`restart: unless-stopped`によるクラッシュループ時の重複送信防止」が正しく機能する状態に戻っている。**
+
+**再作成後のpending_notificationsポーリング動作確認**: 実在のOpportunity/ReleaseEvent(タスク22で生成された別件)に紐付け、`[検証専用]`と明記したembedを持つテスト行を`docker compose up -d bot`実行前に1件挿入しておいた。再作成後の起動直後(`on_ready`→`discord.ext.tasks.loop`の即時1回目実行)にこの行が拾われ、ログに`[通知配信] checked=1 sent=1 failed=0 errors=[]`が出力され、DB上も`status=sent`・実際のDiscordメッセージID(`1534822022448943115`)が入ったことを確認した。**コンテナ再作成後もポーリングは正常に動作する。**
 
 ### 15.6 別タスクとして記録(今回のスコープ外)
 
-- 上記「bot再起動のたびにテスト通知が飛んでいる可能性」の確認・是正。
+(15.5で記録していた「bot再起動のたびにテスト通知が飛んでいる可能性」は上記の通り確認・是正済み)
 - `pending_notifications`の運用監視(`failed`件数の可視化。`scripts/collector_status.py`相当のCLIは今回作っていない)。
