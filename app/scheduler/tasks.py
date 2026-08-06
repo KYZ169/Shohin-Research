@@ -1,20 +1,40 @@
 """Celery Beatから定期実行されるタスク定義(CLAUDE.mdタスク12)。
 
-【スコープに関する注記】
-ここではSource/Market Collectorの定期実行そのもの(fetch→parse→normalize)のみを
-配線する。収集結果(NormalizedItem/MarketObservation)をrelease_events/
-profit_snapshots/opportunitiesへ実際に反映するパイプライン(Product Matcherを
-介したDB書き込み、Opportunity生成、Discord通知トリガー)はCLAUDE.md Phase 0の
-タスク一覧に明示的な項目が無く、これ単体でも相応の規模になるためスコープ外とする
-(CLAUDE.md 0.5「タスクの粒度・分割方法は自分で判断してよい」に基づく判断)。
-本タスクでは収集結果を構造化ログに出力するところまでを「定期実行結線」の完了条件とする。
+【スコープに関する注記(2026-08-06、タスク20で更新)】
+当初(タスク12)はSource/Market Collectorの定期実行そのもの(fetch→parse→normalize)の
+配線のみをスコープとし、収集結果をDBへ反映するパイプラインは別タスク扱いとしていた。
+その結果、run_ichiban_kuji_collector/run_suruga_ya_price_rising_scanのいずれも
+collector_runsテーブルへのログ記録のみで、products/release_events/opportunitiesへの
+書き込みを一切行わない状態が続いていた(発見した新商品がDiscord通知に構造的に
+一切繋がらないという重大な欠落。2026-08-06の本番実機検証で発覚、CLAUDE.md 3節・
+11節参照)。本タスク(タスク20)でこれを解消した:
+- run_ichiban_kuji_collector: ingest_normalized_item()(タスク13)を呼び出し、
+  収集した商品を実際にproducts/release_eventsへ反映するようにした。
+- run_suruga_ya_price_rising_scan: match_observation_to_product()(タスク13)で
+  観測した買取価格を既存Productと照合し、一致すればbuild_and_score_opportunity()/
+  evaluate_notification()(いずれもタスク13で実装済み、変更無し)でOpportunity生成・
+  通知判定まで行うようにした。
+一番くじ側(仕入れ)は相場データを持たないため、Opportunity生成・通知判定は相場側
+(suruga_ya)がマッチした時点で行う設計とした(そこが自然な結合点であり、
+一番くじCollector自身がsuruga_yaを検索しにいく必要が無い)。
 
 【手動検証専用タスクについて(タスク19)】
-run_live_e2e_verification()は上記のスコープ外判断とは別に、「収集→DB反映→商品照合→
+run_live_e2e_verification()はタスク20より前から、「収集→DB反映→商品照合→
 Profit Engine→Opportunity生成→通知判定」の一連が実際に動くことをConoHa VPS上で
-人力検証するための専用タスク。beat_scheduleには登録せず、
-scripts/verify_live_e2e.pyからの手動triggerのみを想定する(実運用の自動パイプライン
-ではない。上記のスコープ外判断そのものは変わっていない)。
+人力検証するための専用タスクとして存在していた(合成のMarketObservationを使うため
+実データのみのタスク20とは別物として維持している)。beat_scheduleには登録せず、
+scripts/verify_live_e2e.pyからの手動triggerのみを想定する。
+
+【Discord送信について(タスク19・20共通の設計方針)】
+いずれのタスクもDiscordへの実送信(discord.Clientによるゲートウェイ接続)は
+タスクの中では行わない。Celeryタスクは同期実行モデルが基本であり、discord.pyの
+非同期ゲートウェイ接続と相性が悪いため、意図的に分離している。should_send=Trueの
+ものはembed(dict、JSON化可能)を返り値に含めるところまでとし、実送信は呼び出し側
+(常時起動Bot等、discord.Clientを持つ別プロセス)が担当する。**この「実送信を
+自動的に拾って送る仕組み」自体はタスク20の時点でまだ存在しない(常時起動Botは
+現状--send-test-notification起動時に1回送るのみ)。新商品が実際に自動でDiscordへ
+届くには、常時起動Bot側にこれらのタスクの結果を定期的に取得して送信する仕組みを
+別途実装する必要がある(CLAUDE.md 3節に記録)。**
 """
 
 import asyncio
@@ -23,15 +43,17 @@ from datetime import datetime
 from decimal import Decimal
 
 import redis as redis_module
+from sqlalchemy.orm import Session
 
-from app.collectors.base import CollectorHealth, CollectorRunResult, FetchError, ParseError
+from app.collectors.base import CollectorHealth, FetchError, ParseError
 from app.collectors.markets.base import MarketDataType, MarketObservation
 from app.collectors.markets.suruga_ya import SurugaYaCollector
 from app.collectors.sources.ichiban_kuji import IchibanKujiCollector
 from app.config import settings
 from app.core.time import JST
-from app.db.models import Product, Shop, Source
+from app.db.models import ManualReviewTask, Opportunity, Product, ReleaseEvent, Shop, Source
 from app.db.session import SessionLocal
+from app.domain.enums import ManualReviewTaskStatus, MatchStatus
 from app.pipeline.ingest import ingest_normalized_item
 from app.pipeline.market_matching import match_observation_to_product
 from app.pipeline.notify import evaluate_notification
@@ -40,6 +62,23 @@ from app.scheduler.celery_app import celery_app
 from app.scheduler.run_log import record_collector_run
 
 logger = logging.getLogger(__name__)
+
+
+def _pending_manual_review_task_id(session: Session, opportunity: Opportunity) -> str | None:
+    """Discordの「照合を確定する」/「別商品として分離」ボタン(app/notification/
+    interaction_view.py)の表示条件である「match_status==NEEDS_REVIEWかつ該当pending
+    タスクが実在する」を判定し、該当すればmanual_review_task_idを返す
+    (2026-08-05に各所で個別実装していたものをタスク20で共通ヘルパーとして抽出)。
+    """
+    if opportunity.match_status != MatchStatus.NEEDS_REVIEW:
+        return None
+    pending_task = (
+        session.query(ManualReviewTask)
+        .filter_by(candidate_product_id=opportunity.product_id, status=ManualReviewTaskStatus.PENDING)
+        .order_by(ManualReviewTask.created_at.desc())
+        .first()
+    )
+    return str(pending_task.id) if pending_task is not None else None
 
 # CLAUDE.md 1.3: 「巡回時はpurchase_hendou=価格上昇中で絞った差分取得を定期実行すると、
 # 通知価値の高い案件を効率的に拾える」との推奨はあるが、具体的にどのキーワードで
@@ -52,48 +91,185 @@ SURUGA_YA_PRICE_RISING_RESTRICT = "purchase_hendou=価格上昇中"
 ICHIBAN_KUJI_TASK_NAME = "app.scheduler.tasks.run_ichiban_kuji_collector"
 
 
+ICHIBAN_KUJI_SOURCE_COLLECTOR_KEY = "ichiban_kuji"
+
+
 @celery_app.task(name=ICHIBAN_KUJI_TASK_NAME)
 def run_ichiban_kuji_collector() -> dict:
-    """CLAUDE.md 8.5.4: 6時間に1回、1kuji.comのPICK UP ITEMを巡回する。"""
+    """CLAUDE.md 8.5.4: 6時間に1回、1kuji.com/on-line.1kuji.comを巡回する。
+
+    2026-08-06(タスク20): 従来はcollector.run()による収集ログ記録のみで、
+    products/release_eventsへのDB反映を一切行っていなかった(モジュールdocstring
+    「スコープに関する注記」参照)。collector.run()は各URLをfetchしたNormalizedItemを
+    呼び出し側へ返さない設計のため、ここではrun()を使わず同等のfetch→parse→normalize→
+    validateループを直接書き、ingest_normalized_item()(タスク13、変更無し)を
+    呼び出して実際にDBへ反映するようにした。
+    このCollector自身は相場側(買取価格等)のデータを持たないため、Opportunity生成・
+    通知判定はここでは行わない。相場側のrun_suruga_ya_price_rising_scanが
+    match_observation_to_product()で本タスクにより永続化されたProductと
+    突き合わせた時点で行う(自然な結合点、モジュールdocstring参照)。
+    """
     started_at = datetime.now(tz=JST)
     collector = IchibanKujiCollector()
-    try:
-        result: CollectorRunResult = asyncio.run(collector.run())
-    except Exception as exc:
-        # collector.run()は通常FetchError/ParseErrorを内部でCollectorHealthに
-        # 変換して正常returnする設計だが、想定外の例外(プログラムバグ等)は
-        # ここまで飛んでくる。Celery自体の失敗検知は変えたくないのでraiseし直すが、
-        # 稼働状況CLIから「実行はされたが落ちた」ことが見えるよう記録は残す。
-        record_collector_run(
-            ICHIBAN_KUJI_TASK_NAME, started_at, status="failure", error_message=f"{type(exc).__name__}: {exc}"
-        )
-        raise
+    errors: list[str] = []
+    normalized_items = []
+
+    for index, url in enumerate(collector.target_urls):
+        if index > 0:
+            asyncio.run(asyncio.sleep(collector.rate_limit()))
+        try:
+            raw = asyncio.run(collector.fetch(url))
+            parsed_items = collector.parse(raw)
+        except (FetchError, ParseError) as exc:
+            errors.append(f"fetch/parse failed for {url}: {exc}")
+            continue
+        normalized_items.extend(collector.normalize(parsed_items))
+
+    success_count = 0
+    ingested_count = 0
+    # 取得できたアイテムが1件も無い場合(全URLのfetch/parseが失敗)は、DBセッションを
+    # 開かずに終了する。record_collector_run()のみがDBへ触れる既存の挙動を維持し
+    # (このタスクの単体テストがDB接続無しで完結できることの前提でもある)、
+    # 無意味なSource行の作成も避ける。
+    if normalized_items:
+        session = SessionLocal()
+        try:
+            source = (
+                session.query(Source).filter_by(collector_key=ICHIBAN_KUJI_SOURCE_COLLECTOR_KEY).one_or_none()
+            )
+            if source is None:
+                source = Source(
+                    name="一番くじ公式",
+                    base_url="https://1kuji.com",
+                    collector_key=ICHIBAN_KUJI_SOURCE_COLLECTOR_KEY,
+                )
+                session.add(source)
+                session.flush()
+
+            for item in normalized_items:
+                field_errors = collector.validate(item)
+                if field_errors:
+                    errors.append(f"validation failed for '{item.product_name}': {'; '.join(field_errors)}")
+                    continue
+                success_count += 1
+                ingest_normalized_item(session, source, item)
+                ingested_count += 1
+
+            session.commit()
+        except Exception as exc:
+            session.rollback()
+            logger.exception("[ichiban_kuji] DB ingest failed")
+            errors.append(f"ingest failed: {type(exc).__name__}: {exc}")
+            # このバッチ全体がロールバックされたため、ingest件数はゼロ扱いにする。
+            ingested_count = 0
+        finally:
+            session.close()
+
+    error_count = len(errors)
+    if error_count == 0:
+        health = CollectorHealth.OK
+    elif success_count > 0:
+        health = CollectorHealth.DEGRADED
+    else:
+        health = CollectorHealth.FAILING
 
     logger.info(
-        "ichiban_kuji collector run finished: health=%s success=%d error=%d errors=%s",
-        result.health.value,
-        result.success_count,
-        result.error_count,
-        result.errors,
+        "ichiban_kuji collector run finished: health=%s success=%d error=%d ingested=%d errors=%s",
+        health.value,
+        success_count,
+        error_count,
+        ingested_count,
+        errors,
     )
     # OK/DEGRADED(一部欠落はあっても実行自体は完走)はsuccess、FAILING/DISABLEDはfailure扱い。
-    status = "success" if result.health in (CollectorHealth.OK, CollectorHealth.DEGRADED) else "failure"
+    status = "success" if health in (CollectorHealth.OK, CollectorHealth.DEGRADED) else "failure"
     record_collector_run(
         ICHIBAN_KUJI_TASK_NAME,
         started_at,
         status=status,
-        summary=f"health={result.health.value} success={result.success_count} error={result.error_count}",
-        error_message="; ".join(result.errors) if status == "failure" and result.errors else None,
+        summary=f"health={health.value} success={success_count} error={error_count} ingested={ingested_count}",
+        error_message="; ".join(errors) if status == "failure" and errors else None,
     )
     return {
-        "source_name": result.source_name,
-        "health": result.health.value,
-        "success_count": result.success_count,
-        "error_count": result.error_count,
+        "source_name": collector.source_name,
+        "health": health.value,
+        "success_count": success_count,
+        "error_count": error_count,
+        "ingested_count": ingested_count,
     }
 
 
 SURUGA_YA_SCAN_TASK_NAME = "app.scheduler.tasks.run_suruga_ya_price_rising_scan"
+
+
+def _match_and_score_observation(
+    session: Session, redis_client, observation: MarketObservation, channel_name: str
+) -> list[dict]:
+    """MarketObservationを既存Productへ照合し(match_observation_to_product、タスク13・
+    変更無し)、一致すれば紐づく各release_events(価格確定済み・未削除のもの)について
+    Opportunity生成・通知判定まで行う(build_and_score_opportunity/evaluate_notification、
+    いずれもタスク13の実装そのまま呼び出す。新規ロジックはこの関数によるオーケストレーション
+    のみ)。should_send=Trueの結果のみdictのリストとして返す(Discord送信はしない、
+    モジュールdocstring参照)。
+
+    1つのProductが複数release_events(異なる店舗・日程)を持つことは技術分析9章の
+    設計上問題無いため(app/pipeline/manual_review.py等でも前提にしている挙動)、
+    全件についてOpportunityを生成する。
+    """
+    match = match_observation_to_product(session, observation)
+    if match is None:
+        return []
+    matched_product, market_match_status = match
+
+    release_events = (
+        session.query(ReleaseEvent)
+        .filter(
+            ReleaseEvent.product_id == matched_product.id,
+            ReleaseEvent.deleted_at.is_(None),
+            ReleaseEvent.price.isnot(None),
+        )
+        .all()
+    )
+
+    results: list[dict] = []
+    for release_event in release_events:
+        shop = session.get(Shop, release_event.shop_id)
+        source = session.get(Source, release_event.source_id)
+
+        build_result = build_and_score_opportunity(
+            session,
+            release_event=release_event,
+            product=matched_product,
+            observation=observation,
+            match_status=market_match_status,
+            channel_name=channel_name,
+        )
+        if build_result is None:
+            continue
+
+        decision = evaluate_notification(
+            redis_client,
+            release_event=release_event,
+            shop=shop,
+            product=matched_product,
+            source=source,
+            observation=observation,
+            standard_displayed_profit=build_result.standard_displayed_profit,
+            standard_excluded_cost_items=build_result.standard_excluded_cost_items,
+            match_status=market_match_status,
+            target_prefectures=set(),
+        )
+        if decision.should_send:
+            results.append(
+                {
+                    "release_event_id": str(release_event.id),
+                    "product_name": matched_product.name,
+                    "opportunity_id": str(build_result.opportunity.id),
+                    "manual_review_task_id": _pending_manual_review_task_id(session, build_result.opportunity),
+                    "embed": decision.embed,
+                }
+            )
+    return results
 
 
 @celery_app.task(name=SURUGA_YA_SCAN_TASK_NAME)
@@ -102,12 +278,18 @@ def run_suruga_ya_price_rising_scan() -> dict:
 
     MarketCollectorはSourceCollectorと異なりrun()を持たない(技術分析10章の設計どおり
     search()/parse_observations()のみ)ため、このタスク内でオーケストレーションする。
+
+    2026-08-06(タスク20): 観測した買取価格を_match_and_score_observation()で
+    既存Productと照合し、Opportunity生成・通知判定まで行うようにした
+    (モジュールdocstring参照)。
     """
     started_at = datetime.now(tz=JST)
     collector = SurugaYaCollector()
     keyword_results: dict[str, int] = {}
     error_messages: list[str] = []
     error_count = 0
+    pending_notifications: list[dict] = []
+    all_observations: list[MarketObservation] = []
 
     for keyword in SURUGA_YA_SCAN_KEYWORDS:
         try:
@@ -119,10 +301,32 @@ def run_suruga_ya_price_rising_scan() -> dict:
             logger.info(
                 "suruga_ya price-rising scan: keyword=%s observations=%d", keyword, len(observations)
             )
+            all_observations.extend(observations)
         except (FetchError, ParseError) as exc:
             error_count += 1
             error_messages.append(f"{keyword}: {exc}")
             logger.warning("suruga_ya price-rising scan failed for keyword=%s: %s", keyword, exc)
+
+    # 全キーワードが失敗し観測値が1件も無い場合は、DB/Redisセッションを開かずに終了する
+    # (ichiban_kuji側と同じ理由。モジュールdocstring参照)。
+    if all_observations:
+        session = SessionLocal()
+        redis_client = redis_module.Redis.from_url(settings.redis_url, decode_responses=True)
+        try:
+            for observation in all_observations:
+                try:
+                    pending_notifications.extend(
+                        _match_and_score_observation(session, redis_client, observation, channel_name="suruga_ya")
+                    )
+                except Exception:
+                    logger.exception(
+                        "suruga_ya price-rising scan: failed to match/score observation title=%s",
+                        observation.extra.get("title"),
+                    )
+            session.commit()
+        finally:
+            redis_client.close()
+            session.close()
 
     # 一部キーワードだけ失敗してもタスク自体は完走する設計のため、全キーワードが
     # 失敗した場合のみfailure、1件でも取れていればsuccess(部分成功)として記録する。
@@ -131,10 +335,17 @@ def run_suruga_ya_price_rising_scan() -> dict:
         SURUGA_YA_SCAN_TASK_NAME,
         started_at,
         status=status,
-        summary=f"keyword_results={keyword_results} error_count={error_count}",
+        summary=(
+            f"keyword_results={keyword_results} error_count={error_count} "
+            f"notifications={len(pending_notifications)}"
+        ),
         error_message="; ".join(error_messages) if error_messages else None,
     )
-    return {"keyword_results": keyword_results, "error_count": error_count}
+    return {
+        "keyword_results": keyword_results,
+        "error_count": error_count,
+        "pending_notifications": pending_notifications,
+    }
 
 
 # タスク19: scripts/verify_live_e2e.py専用。実データでのbandaispirits.co.jp検証
@@ -266,10 +477,16 @@ def run_live_e2e_verification(bandaispirits_prd_id: str = VERIFICATION_DEFAULT_P
             stages["opportunity"] = {"ok": False, "error": "build_and_score_opportunity()がNoneを返しました(価格未確定)"}
             session.rollback()
             return stages
+        # Discordの「照合を確定する」/「別商品として分離」ボタン(app/notification/
+        # interaction_view.pyモジュールdocstring「表示条件の設計判断」参照)の表示条件
+        # 判定(2026-08-06、タスク20で共通ヘルパーへ抽出、_pending_manual_review_task_id参照)。
+        manual_review_task_id = _pending_manual_review_task_id(session, build_result.opportunity)
+
         stages["opportunity"] = {
             "ok": True,
             "displayed_profit": str(build_result.standard_displayed_profit),
             "opportunity_id": str(build_result.opportunity.id),
+            "manual_review_task_id": manual_review_task_id,
         }
 
         stages["stage"] = "notify_decision"

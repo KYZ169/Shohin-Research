@@ -12,6 +12,29 @@ botコンテナから使うとhttpx.ConnectErrorになり、例外がinteraction
 返すようtry/exceptを追加)。単体テスト(tests/unit/test_interaction_view.pyの
 「モックしたInteractionオブジェクト」経由での検証)に加え、実際のDiscordボタン押下→
 コールバック起動という経路そのものも確認済み。
+
+【2026-08-05: manual_review_tasks結線(「照合を確定する」/「別商品として分離」)】
+CLAUDE.md 6節で実装済みのマージ処理(POST /manual-review-tasks/{id}/resolve)への
+Discordボタン入口を追加した。既存3ボタンとは別枠(row=1)にし、`manual_review_task_id`が
+渡された場合のみ動的に追加する(discord.ui.buttonデコレータは全インスタンス共通のため、
+「NEEDS_REVIEWのOpportunityにのみ出したい」条件付き表示にはadd_item()による動的追加を
+使う)。
+
+表示条件の設計判断(ユーザー確認済み): manual_review_tasksは「仕入れ側
+(ingest_normalized_item)のProduct照合」がNEEDS_REVIEWになった時にだけ作成され、
+その候補Product IDはOpportunity.product_idと一致する。一方Opportunity.match_status
+自体は「相場側(MarketObservation)の独立した照合結果」からセットされるため、
+仕入れ側と相場側の照合結果が食い違うケースがあり得る(例: 仕入れ側はNEEDS_REVIEWで
+候補Product+manual_review_taskが作られたが、相場側は別のProductにAUTO_MATCHし、
+Opportunity.match_statusはNEEDS_REVIEWにならない)。このモジュールはボタンの
+表示可否そのものには関与せず(呼び出し側が`manual_review_task_id`の有無で判断する)、
+呼び出し側(app/bot/main.py/scripts/verify_live_e2e.py)は「match_status==NEEDS_REVIEW
+かつ該当pendingタスクが実在する」の両方を満たす場合のみ`manual_review_task_id`を渡す
+方針とした。片方しか満たさない場合(食い違いケース)はボタンを出さない
+(CLAUDE.md 3節に既知の制約として記録)。
+
+誤操作防止のため、いずれのボタンも直接は実行せず、まずephemeralな確認メッセージ
+(実行/キャンセルの再クリック方式、`_ManualReviewConfirmView`)を挟む。
 """
 
 import discord
@@ -24,6 +47,67 @@ __all__ = ["OpportunityActionView"]
 
 def _connection_error_message(exc: httpx.HTTPError) -> str:
     return f"処理に失敗しました(API接続エラー): {type(exc).__name__}: {exc}"
+
+
+def _headers() -> dict:
+    return {"Authorization": f"Bearer {settings.api_key}"} if settings.api_key else {}
+
+
+class _ManualReviewConfirmView(discord.ui.View):
+    """「照合を確定する」/「別商品として分離」の誤操作防止用、再クリック確認View。
+
+    ephemeralな確認メッセージに添付し、「実行する」を押した時点で初めて
+    POST /manual-review-tasks/{id}/resolveを叩く。timeout=60で放置時は自動失効させる
+    (マージ/分離は重い操作のため、応答不能なボタンを残し続けないようにする)。
+    """
+
+    def __init__(
+        self,
+        manual_review_task_id: str,
+        resolution: str,
+        api_base_url: str,
+        http_client: httpx.AsyncClient | None,
+    ) -> None:
+        super().__init__(timeout=60)
+        self.manual_review_task_id = manual_review_task_id
+        self.resolution = resolution
+        self.api_base_url = api_base_url
+        self._injected_client = http_client
+
+    def _make_client(self) -> httpx.AsyncClient:
+        if self._injected_client is not None:
+            return self._injected_client
+        return httpx.AsyncClient(base_url=self.api_base_url)
+
+    @discord.ui.button(label="実行する", style=discord.ButtonStyle.danger)
+    async def execute(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        try:
+            async with self._make_client() as client:
+                response = await client.post(
+                    f"/manual-review-tasks/{self.manual_review_task_id}/resolve",
+                    json={"resolution": self.resolution, "resolved_by": f"discord:{interaction.user}"},
+                    headers=_headers(),
+                )
+        except httpx.HTTPError as exc:
+            await interaction.response.edit_message(content=_connection_error_message(exc), view=None)
+            return
+
+        if response.status_code < 300:
+            action_done = "統合(確定)" if self.resolution == "confirm" else "分離(別商品として維持)"
+            await interaction.response.edit_message(content=f"照合結果を{action_done}しました。", view=None)
+        else:
+            detail = ""
+            try:
+                detail = str(response.json().get("detail", ""))
+            except ValueError:
+                pass
+            await interaction.response.edit_message(
+                content=f"処理に失敗しました(status={response.status_code}) {detail}".rstrip(), view=None
+            )
+
+    @discord.ui.button(label="キャンセル", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await interaction.response.edit_message(content="キャンセルしました(何も変更していません)。", view=None)
 
 
 class OpportunityActionView(discord.ui.View):
@@ -50,12 +134,56 @@ class OpportunityActionView(discord.ui.View):
         api_base_url: str = "http://api:8000",
         http_client: httpx.AsyncClient | None = None,
         timeout: float | None = None,
+        # 2026-08-05: manual_review_tasks結線。呼び出し側が「match_status==NEEDS_REVIEW
+        # かつ該当pendingタスクが実在する」の両方を確認した上でのみ渡す想定
+        # (モジュールdocstring「表示条件の設計判断」参照)。Noneなら2ボタンとも追加しない。
+        manual_review_task_id: str | None = None,
     ) -> None:
         super().__init__(timeout=timeout)
         self.event_id = event_id
         self.opportunity_id = opportunity_id
         self.api_base_url = api_base_url
         self._injected_client = http_client
+        self.manual_review_task_id = manual_review_task_id
+
+        if manual_review_task_id is not None:
+            # @discord.ui.buttonデコレータは全インスタンス共通のボタンにしか使えないため、
+            # 「manual_review_task_idがある時だけ」の条件付き追加はadd_item()で行う。
+            # row=1にして既存3ボタン(row=0扱い)とは別枠にする。
+            confirm_button: discord.ui.Button = discord.ui.Button(
+                label="照合を確定する", style=discord.ButtonStyle.success, row=1
+            )
+            confirm_button.callback = self._prompt_confirm_match
+            self.add_item(confirm_button)
+
+            separate_button: discord.ui.Button = discord.ui.Button(
+                label="別商品として分離", style=discord.ButtonStyle.secondary, row=1
+            )
+            separate_button.callback = self._prompt_separate_product
+            self.add_item(separate_button)
+
+    async def _prompt_confirm_match(self, interaction: discord.Interaction) -> None:
+        await self._send_manual_review_confirmation_prompt(interaction, resolution="confirm")
+
+    async def _prompt_separate_product(self, interaction: discord.Interaction) -> None:
+        await self._send_manual_review_confirmation_prompt(interaction, resolution="reject")
+
+    async def _send_manual_review_confirmation_prompt(
+        self, interaction: discord.Interaction, resolution: str
+    ) -> None:
+        action_label = "照合を確定する(候補商品を既存商品へ統合します)" if resolution == "confirm" else "別商品として分離する(統合しません)"
+        warning = "統合は元に戻せません。" if resolution == "confirm" else ""
+        confirm_view = _ManualReviewConfirmView(
+            manual_review_task_id=self.manual_review_task_id,
+            resolution=resolution,
+            api_base_url=self.api_base_url,
+            http_client=self._injected_client,
+        )
+        await interaction.response.send_message(
+            f"本当によろしいですか?\n操作: {action_label}\n{warning}",
+            view=confirm_view,
+            ephemeral=True,
+        )
 
     def _make_client(self) -> httpx.AsyncClient:
         if self._injected_client is not None:
@@ -63,7 +191,7 @@ class OpportunityActionView(discord.ui.View):
         return httpx.AsyncClient(base_url=self.api_base_url)
 
     def _headers(self) -> dict:
-        return {"Authorization": f"Bearer {settings.api_key}"} if settings.api_key else {}
+        return _headers()
 
     @discord.ui.button(label="応募済みにする", style=discord.ButtonStyle.primary)
     async def mark_applied(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:

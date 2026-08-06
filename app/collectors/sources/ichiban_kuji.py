@@ -1,11 +1,37 @@
-"""一番くじCollector: 1kuji.com(メイン) + bandaispirits.co.jp(補完・裏取り)。
+"""一番くじCollector: 1kuji.com(メイン) + bandaispirits.co.jp(補完・裏取り)
++ on-line.1kuji.com(商品一覧ページのみ、新商品自動発見用)。
 
 CLAUDE.md 1.1 / 8.5, 実装仕様書9章の実測結果に基づく:
 - 1kuji.com: Bot対策なし。トップページの「PICK UP ITEM」に店頭/オンライン販売日時が
   構造化テキストとして併記されており、fulfillment_typeの判定にそのまま使える。
 - bandaispirits.co.jp: Bot対策なし。商品詳細ページで価格・発売日の補完/裏取りに使う。
-- on-line.1kuji.com: Bot対策により取得不可(確認済み)。本Collectorは絶対にこのドメインへ
-  リクエストしない(CLAUDE.mdタスク4着手前チェックリスト)。
+- on-line.1kuji.com: 商品詳細・応募ページ(ProductDetail.aspx等)はBot対策により
+  取得不可(確認済み)。**ただし商品一覧ページ(ProductList.aspx)のみは例外的に
+  取得可能であることを2026-08-06に確認した(詳細は下記検証状況・CLAUDE.md 1.1参照)。**
+  本Collectorはこの1URL(`ONLINE_1KUJI_PRODUCT_LIST_URL`)以外、on-line.1kuji.comへは
+  絶対にリクエストしない(ホワイトリスト形式、`fetch()`参照)。
+
+【検証状況(2026-08-06、on-line.1kuji.com商品一覧ページの取得可否確認)】
+CLAUDE.md 1.1では「on-line.1kuji.comはBot対策により取得不可」と確認済みだったが、
+これは商品詳細・応募ページ(ProductDetail.aspx等)を根拠にした判定だった。同じドメイン内の
+商品一覧ページ(https://on-line.1kuji.com/Form/Product/ProductList.aspx)を実際に取得した
+生HTML(tests/fixtures/raw_html/raw_online_1kuji_productlist.html)を確認したところ、
+Bot対策に阻まれず正常に取得でき、確認時点で販売中の全22商品のpid・商品名・価格・
+販売期間開始日時が`div.m-product-item`単位で構造化されて含まれていることを確認した
+(Cloudflareのbot-management JSスニペットはページに埋め込まれているが、これは
+多くのサイトに標準挿入される監視用スクリプトであり、コンテンツ自体のブロックとは
+別物。実際に全22件のデータが正常にレスポンス本文に含まれていた)。
+p-bandai.jp(トップページは取得可・個別商品ページのみAkamai保護)と同様、
+同一ドメイン内でもパス単位で保護の有無が異なる非対称な構成であり、0節方針4
+「Bot対策サイトは正面突破しない」はブロックされていないページの利用を妨げない
+(取得できないページを無理に突破しないという意味であり、取得できるページまで
+避ける趣旨ではない、ユーザー確認済み)。
+このページで取得できないもの(締切・当選発表等)は従来通り取得しない。
+一番くじONLINEは抽選応募制ではなく購入型のオンラインくじという性質のため、
+そもそも「締切」という概念が存在しない可能性があるが、この点は実データからは
+確認できていない(要継続検証、CLAUDE.md 3節参照)。deadline_at=Noneのままにすることで、
+release_events.deadline_sourceは既存のデフォルト値(DeadlineSource.UNKNOWN)が
+自動的に適用される(明示的な追加実装は不要)。
 
 【検証状況(2026-08-03、本番ConoHa VPSでの実データ検証により更新)】
 トップページ(_parse_top_page/PICK UP ITEM抽出)は、本番VPSで実際に取得した生HTML
@@ -66,9 +92,24 @@ ICHIBAN_KUJI_TOP_URL = "https://1kuji.com/"
 BANDAISPIRITS_DETAIL_URL_TEMPLATE = (
     "https://www.bandaispirits.co.jp/products/search/detail.php?prd_id={prd_id}&grp_id=9999"
 )
+ONLINE_1KUJI_BASE_URL = "https://on-line.1kuji.com"
+# モジュールdocstring「検証状況(2026-08-06)」参照。on-line.1kuji.comの中でこの1URLのみ
+# fetch()が許可する(ホワイトリスト、完全一致)。ProductDetail.aspx等は引き続き禁止。
+ONLINE_1KUJI_PRODUCT_LIST_URL = "https://on-line.1kuji.com/Form/Product/ProductList.aspx"
 
 # 実データ確認済み(raw_1kuji_top.html): 商品詳細へのリンクは相対パス「/products/{slug}」。
 PRODUCT_PATH_PATTERN = re.compile(r"^/products/[\w-]+$")
+
+# 実データ確認済み(raw_online_1kuji_productlist.html): 商品詳細/応募ページへのリンクに
+# "pid=xxxxxxx"または"pid=sap_0000008524"のようなクエリパラメータで商品IDが入っている。
+PID_PATTERN = re.compile(r"[?&]pid=(?P<pid>[^&]+)")
+# 実データ確認済み: "&#165;700(税込)"のように金額と「(税込)」が並ぶ(HTML実体参照はselectolaxの
+# text()でデコードされ、amountの前に通貨記号やその他の空白が入りうるため金額部分のみを拾う)。
+ONLINE_1KUJI_PRICE_PATTERN = re.compile(r"(?P<amount>[\d,]+)\s*\(税込\)")
+# 実データ確認済み: "2026年08月05日（水）13:00"のように全角括弧の曜日を挟んで時刻が続く。
+ONLINE_1KUJI_SELL_FROM_PATTERN = re.compile(
+    r"(?P<y>\d{4})年(?P<mo>\d{2})月(?P<d>\d{2})日.*?(?P<h>\d{2}):(?P<mi>\d{2})"
+)
 
 # 実データ確認済み(raw_1kuji_top.html): 日付テキスト自体には「店頭販売」等のラベルを
 # 含まない(ラベルは別要素のp.status)。「より発売予定」「より順次発売予定」の両方の
@@ -153,6 +194,10 @@ class IchibanKujiCollector(SourceCollector):
 
     - 1kuji.com: トップページのPICK UP ITEMセクションから新着シリーズを自動収集する
       (run()の自動巡回対象)。
+    - on-line.1kuji.com: ProductList.aspx(商品一覧ページ)のみ、新商品の自動発見用に
+      run()の自動巡回対象に含める(モジュールdocstring「検証状況(2026-08-06)」参照)。
+      ProductDetail.aspx等の個別詳細・応募ページには絶対にアクセスしない
+      (fetch()でホワイトリスト形式に制限、CLAUDE.md 1.1参照)。
     - bandaispirits.co.jp: 個別商品の価格・発売日の補完/裏取り用。detail.php?prd_id=...の
       URLはprd_idが事前にわからないと組み立てられない(1kuji.com側では商品slugしか
       分からず、prd_idとの対応関係はこのFixtureの範囲では確認できていない)ため、
@@ -162,13 +207,19 @@ class IchibanKujiCollector(SourceCollector):
 
     source_name = "ichiban_kuji"
     supported_event_types = [SupportedEventType.LOTTERY]
-    target_urls = [ICHIBAN_KUJI_TOP_URL]
+    target_urls = [ICHIBAN_KUJI_TOP_URL, ONLINE_1KUJI_PRODUCT_LIST_URL]
     default_interval_seconds = 6 * 60 * 60  # CLAUDE.md 8.5.4: 6時間に1回
 
     async def fetch(self, target_url: str) -> RawFetchResult:
-        if "on-line.1kuji.com" in target_url:
-            # CLAUDE.mdタスク4着手前チェックリスト: 絶対にこのドメインへリクエストしない
-            raise FetchError("on-line.1kuji.comへの自動アクセスは方針により禁止されています")
+        # ホワイトリスト形式: on-line.1kuji.com宛のリクエストは、完全一致する
+        # ONLINE_1KUJI_PRODUCT_LIST_URL(商品一覧ページ)のみ許可する。それ以外
+        # (ProductDetail.aspx等の個別詳細・応募ページを含む)は引き続き全面禁止
+        # (モジュールdocstring「検証状況(2026-08-06)」参照)。
+        if "on-line.1kuji.com" in target_url and target_url != ONLINE_1KUJI_PRODUCT_LIST_URL:
+            raise FetchError(
+                "on-line.1kuji.comへの自動アクセスは方針により禁止されています"
+                f"(許可されているのは{ONLINE_1KUJI_PRODUCT_LIST_URL}のみ)"
+            )
 
         try:
             # follow_redirects=True: app/collectors/markets/suruga_ya.pyと同じ理由
@@ -193,12 +244,18 @@ class IchibanKujiCollector(SourceCollector):
         if not raw.html:
             raise ParseError(f"{raw.url}: html本文が空です")
 
+        # 注意: "on-line.1kuji.com"は文字列として"1kuji.com"を含むため、この判定は
+        # 必ず下の"1kuji.com"判定より先に行うこと(順序を入れ替えるとトップページ用の
+        # _parse_top_page()に誤って渡り、「PICK UP ITEMを1件も抽出できませんでした」で
+        # 失敗する)。
+        if "on-line.1kuji.com" in raw.url:
+            return self._parse_online_product_list(raw)
         if "1kuji.com" in raw.url and "bandaispirits" not in raw.url:
             return self._parse_top_page(raw)
         if "bandaispirits.co.jp" in raw.url:
             return [self._parse_bandaispirits_detail(raw)]
 
-        raise ParseError(f"{raw.url}: 未対応のURLです(1kuji.com/bandaispirits.co.jpのみ対応)")
+        raise ParseError(f"{raw.url}: 未対応のURLです(1kuji.com/on-line.1kuji.com/bandaispirits.co.jpのみ対応)")
 
     def _parse_top_page(self, raw: RawFetchResult) -> list[ParsedItem]:
         tree = HTMLParser(raw.html)
@@ -263,6 +320,94 @@ class IchibanKujiCollector(SourceCollector):
 
         if not items:
             raise ParseError(f"{raw.url}: PICK UP ITEMを1件も抽出できませんでした(構造変更の可能性)")
+
+        return items
+
+    def _parse_online_product_list(self, raw: RawFetchResult) -> list[ParsedItem]:
+        """on-line.1kuji.comの商品一覧ページ(ONLINE_1KUJI_PRODUCT_LIST_URL)から、
+        現在販売中の商品(pid・商品名・価格・販売期間開始日時)を抽出する。
+
+        実データ確認済み(raw_online_1kuji_productlist.html): 1商品 = 1つの
+        `div.m-product-item`で、内部に`a.m-product-item__name`(商品名+
+        pidを含むhref)・`.m-product-item__price`(税込価格)・
+        `.m-product-item__sell-from`(販売開始日時)が含まれる。締切・当選発表は
+        このページには存在せず取得できないため、常にNoneのままとする
+        (モジュールdocstring参照)。
+        """
+        tree = HTMLParser(raw.html)
+        items: list[ParsedItem] = []
+
+        for product in tree.css("div.m-product-item"):
+            name_anchor = product.css_first("a.m-product-item__name")
+            if name_anchor is None:
+                continue
+
+            href = name_anchor.attributes.get("href") or ""
+            pid_match = PID_PATTERN.search(href)
+            if pid_match is None:
+                continue
+            pid = pid_match["pid"]
+
+            product_name = name_anchor.text(strip=True)
+            if not product_name:
+                continue
+            # apply_url/product_urlとしてProductDetail.aspxへのリンクを保存するのみで、
+            # 本Collectorがこれをfetch()することは無い(ホワイトリスト方針、クラスdocstring参照)。
+            product_url = urljoin(ONLINE_1KUJI_BASE_URL, href)
+
+            price: Decimal | None = None
+            price_node = product.css_first(".m-product-item__price")
+            if price_node is not None:
+                price_match = ONLINE_1KUJI_PRICE_PATTERN.search(price_node.text(strip=True))
+                if price_match:
+                    try:
+                        price = Decimal(price_match["amount"].replace(",", ""))
+                    except InvalidOperation:
+                        price = None
+
+            start_at: datetime | None = None
+            sell_from_node = product.css_first(".m-product-item__sell-from")
+            if sell_from_node is not None:
+                sell_from_match = ONLINE_1KUJI_SELL_FROM_PATTERN.search(sell_from_node.text(strip=True))
+                if sell_from_match:
+                    start_at = datetime(
+                        int(sell_from_match["y"]),
+                        int(sell_from_match["mo"]),
+                        int(sell_from_match["d"]),
+                        int(sell_from_match["h"]),
+                        int(sell_from_match["mi"]),
+                        tzinfo=JST,
+                    )
+
+            image_urls: list[str] = []
+            img = product.css_first(".m-product-item__image img")
+            if img is not None:
+                src = img.attributes.get("src")
+                if src:
+                    image_urls.append(urljoin(ONLINE_1KUJI_BASE_URL, src))
+
+            items.append(
+                ParsedItem(
+                    raw_title=product_name,
+                    price=price,
+                    image_urls=image_urls,
+                    event_type=SupportedEventType.LOTTERY,
+                    start_at=start_at,
+                    # このページには締切・当選発表の情報が存在しない(モジュールdocstring参照)。
+                    # deadline_at=Noneのままにすることで、release_events.deadline_sourceは
+                    # 既定値のDeadlineSource.UNKNOWNが自動的に適用される。
+                    deadline_at=None,
+                    announce_at=None,
+                    purchase_limit_at=None,
+                    apply_url=product_url,
+                    product_url=product_url,
+                    shop_name=None,
+                    extra={"pid": pid},
+                )
+            )
+
+        if not items:
+            raise ParseError(f"{raw.url}: 商品一覧を1件も抽出できませんでした(構造変更の可能性)")
 
         return items
 

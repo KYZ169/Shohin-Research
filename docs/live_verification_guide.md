@@ -213,6 +213,7 @@ tmux kill-session -t verify
 | `should_send=False`(dedupe判定でunchanged) | 直前の実行と全く同じ内容だったため送信をスキップした(想定内。通常は毎回わずかに金額を変えているため起きないはずだが、同一ミリ秒での連続実行等では起こりうる) | もう一度`bash scripts/verify_live_e2e.sh`を実行する |
 | workerがタスクを拾わない(タイムアウト) | `docker compose up -d worker beat`が失敗している、またはRedisブローカーに接続できていない | `docker compose logs worker` でエラーが出ていないか確認。`Connected to redis://redis:6379/0`のログがあるか |
 | `docker compose up -d db`が`address already in use`で失敗 | ホストの5432番ポートが別プロセス(本VPSの場合、他プロジェクト用のネイティブPostgreSQL)に使われている | 本リポジトリの`docker-compose.yml`は既にホスト側ポートを`55432`にずらして対応済み。それでも失敗する場合は`ss -tlnp \| grep 55432`で衝突が無いか確認 |
+| `curl`で取得したFixture用HTMLが0バイト(空ファイル) | 日本語を含むクエリパラメータ(例: `restrict[]=hardsoft=本体`の「本体」、`search_word=一番くじ`等)をパーセントエンコードせずそのまま`curl`のURLに渡すと、シェル側でクォーティングが崩れる・サーバー側が意図通り解釈しない等の理由で応答本文が空になることがある(2026-08-06、`raw_suruga_ya_switch_hardware.html`取得時に実際に発生。0バイトのまま気づかずコミットしかけた) | 日本語を含むクエリパラメータは必ずURLエンコード済みの形で渡す。例: `本体` → `%E6%9C%AC%E4%BD%93`。Pythonなら`python3 -c "from urllib.parse import quote; print(quote('本体'))"`で変換できる。**取得後は`wc -l`や`ls -la`でFixtureのサイズが0でないことを必ず確認すること**(空ファイルでもcurl自体は成功終了(exit 0)することがあり、コマンドの成否だけでは気づけない) |
 
 上記で解決しない場合は、`verify_logs/`配下に各段階のログが保存されているので、
 `summary_<日時>.log`を確認すると全体の流れを追いやすい。

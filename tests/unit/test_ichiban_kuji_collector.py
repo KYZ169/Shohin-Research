@@ -27,12 +27,15 @@ from pathlib import Path
 import pytest
 
 from app.collectors.base import FetchError, ParseError, RawFetchResult
-from app.collectors.sources.ichiban_kuji import JST, IchibanKujiCollector
+from app.collectors.sources.ichiban_kuji import JST, ONLINE_1KUJI_PRODUCT_LIST_URL, IchibanKujiCollector
 from app.domain.enums import FulfillmentType, RegionSource
 
 RAW_HTML_FIXTURE_PATH = Path(__file__).parent.parent / "fixtures" / "raw_html" / "raw_1kuji_top.html"
 BANDAISPIRITS_RAW_HTML_FIXTURE_PATH = (
     Path(__file__).parent.parent / "fixtures" / "raw_html" / "raw_bandaispirits_detail.html"
+)
+ONLINE_1KUJI_PRODUCT_LIST_RAW_HTML_FIXTURE_PATH = (
+    Path(__file__).parent.parent / "fixtures" / "raw_html" / "raw_online_1kuji_productlist.html"
 )
 
 # 実データ確認済み(raw_1kuji_top.html)の実際のDOM構造を最小限に再現したもの。
@@ -74,6 +77,46 @@ TOP_PAGE_HTML = """
 <a href="/products/some-other-lineup-item">ラインナップ一覧の商品(日付情報なし)</a>
 </section>
 <a href="/products">商品一覧</a>
+</body></html>
+"""
+
+# 実データ確認済み(raw_online_1kuji_productlist.html)の実際のDOM構造
+# (div.m-product-item > a.m-product-item__name(href内にpid) /
+#  .m-product-item__price(「¥NNN(税込)」) / .m-product-item__sell-from
+#  (「YYYY年MM月DD日（曜）HH:MM」))を最小限に再現したもの。1件目は数字pid、
+# 2件目は"sap_"接頭辞付きpid(実データで両方の形式が確認されている)。
+ONLINE_PRODUCT_LIST_HTML = """
+<html><body>
+<div class="c-product-list__item-list">
+  <div class="m-product-item">
+    <div class="m-product-item__image">
+      <a href="/Form/Product/ProductDetail.aspx?shop=0&pid=9058260&bid=IP00004601">
+        <img src="/Contents/ProductImages/0/9058260_LL.jpg">
+      </a>
+    </div>
+    <a href="/Form/Product/ProductDetail.aspx?shop=0&pid=9058260&bid=IP00004601" class="m-product-item__name m-product-item__link">
+      一番くじ 進撃の巨人 ～選択と結果～
+    </a>
+    <a href="/Form/Product/ProductDetail.aspx?shop=0&pid=9058260&bid=IP00004601" class="m-product-item__details m-product-item__link">
+      <p class="m-product-item__price">&#165;700(税込)</p>
+      <p class="m-product-item__sell-from">2026年08月05日（水）13:00</p>
+    </a>
+  </div>
+  <div class="m-product-item">
+    <div class="m-product-item__image">
+      <a href="/Form/Product/ProductDetail.aspx?shop=0&pid=sap_0000008524&bid=IP00002974">
+        <img src="/Contents/ProductImages/0/sap_0000008524_LL.jpg">
+      </a>
+    </div>
+    <a href="/Form/Product/ProductDetail.aspx?shop=0&pid=sap_0000008524&bid=IP00002974" class="m-product-item__name m-product-item__link">
+      一番くじ 春秋戦国大戦キングダム The Animation 知と武の両輪
+    </a>
+    <a href="/Form/Product/ProductDetail.aspx?shop=0&pid=sap_0000008524&bid=IP00002974" class="m-product-item__details m-product-item__link">
+      <p class="m-product-item__price">&#165;790(税込)</p>
+      <p class="m-product-item__sell-from">2026年08月03日（月）15:00</p>
+    </a>
+  </div>
+</div>
 </body></html>
 """
 
@@ -199,6 +242,105 @@ def test_parse_top_page_against_raw_html_fixture():
     assert all(item.product_url.startswith("https://1kuji.com/products/") for item in items)
 
 
+# --- on-line.1kuji.com商品一覧ページ(ProductList.aspx)のテスト(2026-08-06追加) ---
+
+
+def test_parse_online_product_list_extracts_name_price_pid_and_sell_from():
+    collector = IchibanKujiCollector()
+
+    items = collector.parse(_raw(ONLINE_1KUJI_PRODUCT_LIST_URL, ONLINE_PRODUCT_LIST_HTML))
+
+    shingeki = next(i for i in items if i.extra["pid"] == "9058260")
+    assert shingeki.raw_title == "一番くじ 進撃の巨人 ～選択と結果～"
+    assert shingeki.price == Decimal("700")
+    assert shingeki.start_at == datetime(2026, 8, 5, 13, 0, tzinfo=JST)
+    assert shingeki.image_urls == ["https://on-line.1kuji.com/Contents/ProductImages/0/9058260_LL.jpg"]
+
+
+def test_parse_online_product_list_supports_sap_prefixed_pid():
+    """実データ確認済み: pidは数字のみ("9058260")と"sap_"接頭辞付き("sap_0000008524")の
+    両方の形式がある。"""
+    collector = IchibanKujiCollector()
+
+    items = collector.parse(_raw(ONLINE_1KUJI_PRODUCT_LIST_URL, ONLINE_PRODUCT_LIST_HTML))
+
+    kingdom = next(i for i in items if i.extra["pid"] == "sap_0000008524")
+    assert kingdom.raw_title == "一番くじ 春秋戦国大戦キングダム The Animation 知と武の両輪"
+    assert kingdom.price == Decimal("790")
+    assert kingdom.start_at == datetime(2026, 8, 3, 15, 0, tzinfo=JST)
+
+
+def test_parse_online_product_list_builds_absolute_apply_url_without_fetching_it():
+    """apply_url/product_urlにはProductDetail.aspxへの絶対URLを保存するが、
+    本Collectorがこのcollector自身でfetchすることは無い(ホワイトリスト方針)。"""
+    collector = IchibanKujiCollector()
+
+    items = collector.parse(_raw(ONLINE_1KUJI_PRODUCT_LIST_URL, ONLINE_PRODUCT_LIST_HTML))
+
+    shingeki = next(i for i in items if i.extra["pid"] == "9058260")
+    assert (
+        shingeki.apply_url
+        == "https://on-line.1kuji.com/Form/Product/ProductDetail.aspx?shop=0&pid=9058260&bid=IP00004601"
+    )
+    assert shingeki.product_url == shingeki.apply_url
+
+
+def test_parse_online_product_list_deadline_is_always_none():
+    """このページには締切・当選発表の情報が存在しないため、常にNoneのままにする
+    (deadline_source列は既存のデフォルト値UNKNOWNが自動的に適用される)。"""
+    collector = IchibanKujiCollector()
+
+    items = collector.parse(_raw(ONLINE_1KUJI_PRODUCT_LIST_URL, ONLINE_PRODUCT_LIST_HTML))
+
+    assert all(item.deadline_at is None for item in items)
+    assert all(item.announce_at is None for item in items)
+
+
+def test_parse_online_product_list_raises_parse_error_when_no_items_found():
+    collector = IchibanKujiCollector()
+
+    with pytest.raises(ParseError):
+        collector.parse(_raw(ONLINE_1KUJI_PRODUCT_LIST_URL, "<html><body>no products here</body></html>"))
+
+
+def test_parse_online_product_list_against_raw_html_fixture():
+    """CLAUDE.md 1.1「on-line.1kuji.com商品一覧ページの取得可否確認」に対応する検証。
+    実際に取得した生HTML(raw_online_1kuji_productlist.html)には、確認時点で
+    販売中の全22商品が含まれており、コード変更無しで全件正しく抽出できることを確認する。
+    """
+    collector = IchibanKujiCollector()
+    html = ONLINE_1KUJI_PRODUCT_LIST_RAW_HTML_FIXTURE_PATH.read_text(encoding="utf-8")
+
+    items = collector.parse(_raw(ONLINE_1KUJI_PRODUCT_LIST_URL, html))
+
+    assert len(items) == 22
+    # pidが全件ユニークであること(重複抽出していないこと)
+    assert len({item.extra["pid"] for item in items}) == 22
+    assert all(item.price is not None for item in items)
+    assert all(item.start_at is not None for item in items)
+    assert all(item.deadline_at is None for item in items)
+    assert all(item.apply_url.startswith("https://on-line.1kuji.com/Form/Product/ProductDetail.aspx") for item in items)
+
+    shingeki = next(i for i in items if i.extra["pid"] == "9058260")
+    assert shingeki.raw_title == "一番くじ 進撃の巨人 ～選択と結果～"
+    assert shingeki.price == Decimal("700")
+    assert shingeki.start_at == datetime(2026, 8, 5, 13, 0, tzinfo=JST)
+
+    kingdom = next(i for i in items if i.extra["pid"] == "sap_0000008524")
+    assert kingdom.raw_title == "一番くじ 春秋戦国大戦キングダム The Animation 知と武の両輪"
+
+
+def test_normalize_online_product_list_uses_online_shipping_fulfillment():
+    """on-line.1kuji.comは通販専用チャネルのため、fulfillment_typeは常にONLINE_SHIPPING。"""
+    collector = IchibanKujiCollector()
+    items = collector.parse(_raw(ONLINE_1KUJI_PRODUCT_LIST_URL, ONLINE_PRODUCT_LIST_HTML))
+
+    normalized = collector.normalize(items)
+
+    assert all(n.fulfillment_type == FulfillmentType.ONLINE_SHIPPING for n in normalized)
+    assert all(n.region_source == RegionSource.UNKNOWN for n in normalized)
+
+
 def test_parse_bandaispirits_detail_handles_non_standard_free_distribution_price():
     """Fixture注記1: 無料配布ケースでは価格を無理にnullにせず生テキストをextraに残す。"""
     collector = IchibanKujiCollector()
@@ -292,28 +434,52 @@ def test_validate_does_not_require_price_because_top_page_never_has_it():
 
 
 async def test_run_end_to_end_against_top_page_fixture_pattern(monkeypatch):
+    """run()はtarget_urls(1kuji.comトップページ + on-line.1kuji.com商品一覧)を
+    両方巡回するため、target_urlごとに対応するHTMLを返すfake_fetchにする
+    (2026-08-06、on-line.1kuji.com商品一覧をtarget_urlsに追加した際に対応)。"""
     collector = IchibanKujiCollector()
 
     async def fake_fetch(target_url: str) -> RawFetchResult:
+        if "on-line.1kuji.com" in target_url:
+            return _raw(target_url, ONLINE_PRODUCT_LIST_HTML)
         return _raw(target_url, TOP_PAGE_HTML)
 
     monkeypatch.setattr(collector, "fetch", fake_fetch)
 
     result = await collector.run()
 
-    assert result.success_count == 4
+    assert result.success_count == 4 + 2  # トップページ4件 + 商品一覧2件(合成HTML)
     assert result.error_count == 0
 
 
-def test_target_urls_never_reference_on_line_1kuji_com():
-    """CLAUDE.mdタスク4着手前チェックリスト: on-line.1kuji.comへの自動リクエスト禁止。"""
+def test_target_urls_only_reference_product_list_page_on_online_1kuji_com():
+    """CLAUDE.md 1.1(2026-08-06更新): on-line.1kuji.comへの自動リクエストは
+    ONLINE_1KUJI_PRODUCT_LIST_URL(商品一覧ページ)のみホワイトリストで許可されている。
+    それ以外のon-line.1kuji.comパス(個別詳細・応募ページ等)は禁止のまま。
+    """
     collector = IchibanKujiCollector()
 
-    assert all("on-line.1kuji.com" not in url for url in collector.target_urls)
+    online_1kuji_urls = [url for url in collector.target_urls if "on-line.1kuji.com" in url]
+    assert online_1kuji_urls == [ONLINE_1KUJI_PRODUCT_LIST_URL]
 
 
-async def test_fetch_raises_fetch_error_for_on_line_1kuji_com():
+async def test_fetch_raises_fetch_error_for_on_line_1kuji_com_detail_page():
+    """個別詳細・応募ページ(ProductDetail.aspx等)は引き続き全面禁止(Bot対策により
+    取得不可なため)。"""
     collector = IchibanKujiCollector()
 
     with pytest.raises(FetchError):
         await collector.fetch("https://on-line.1kuji.com/some/apply/path")
+
+    with pytest.raises(FetchError):
+        await collector.fetch("https://on-line.1kuji.com/Form/Product/ProductDetail.aspx?pid=123")
+
+
+async def test_fetch_raises_fetch_error_for_product_list_url_with_extra_query():
+    """ホワイトリストは完全一致のみを許可する。クエリパラメータが付加された
+    ProductList.aspxのバリエーションであっても、完全一致しない限り禁止する
+    (厳格なホワイトリストであることの確認)。"""
+    collector = IchibanKujiCollector()
+
+    with pytest.raises(FetchError):
+        await collector.fetch(f"{ONLINE_1KUJI_PRODUCT_LIST_URL}?extra=1")

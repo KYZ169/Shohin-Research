@@ -53,6 +53,65 @@ MODEL_NUMBER_PATTERN(「発売日の直後・13桁JANの直前」という位置
 実データで確認済み。ProductIdentifierType.MODEL("model")としてのDB永続化は
 未実装(product_identifiersテーブル自体、JANを含めどの識別子種別についても
 書き込み処理がまだ無い、app/pipeline/market_matching.py参照)。
+
+【検証状況(2026-08-05、ニンテンドースイッチカテゴリでの型番(英数字混在)・
+hardsoft分類軸確認)】
+category=20038(ニンテンドースイッチ)で取得した実HTML
+(tests/fixtures/raw_html/raw_suruga_ya_switch.html)で2点確認した。
+1. 型番フォーマット: ガンダムカテゴリでは型番が数字のみ(例:"5072030")だったが、
+   ニンテンドースイッチでは"HAC-P-BQPYA"のような英数字+ハイフン混在形式だった。
+   MODEL_NUMBER_PATTERNの`(?P<model>\\S+)`は元々数字限定ではなく非空白文字全般に
+   マッチする実装だったため、コード変更無しで20件全件正しく抽出できることを
+   実データで確認した(誤ってJAN/管理番号として吸収されることも無かった)。
+2. hardsoft分類軸: 検索結果ページのファセットに
+   `restrict[]=hardsoft=ソフト|周辺機器|amiibo|本体`という4種類の分類軸が
+   存在し(技術分析レポート8章で懸念されていた「同じキーワードでも別商品単位」が
+   実際に起こりうるカテゴリ)、既存実装はこれをextraのどこにも保持していなかった。
+   一方、行内の`<div class="category">`要素(全カテゴリ共通で存在する商品種別
+   ラベル、例:ガンダムでは"プラモデル"、ワンピースカードでは個別カード種別名)には
+   ニンテンドースイッチの場合"ニンテンドースイッチソフト"という値が全20件で
+   確認できた。これを`_category_text()`で抽出し、extra["category_text"]として
+   新たに公開するようにした(全カテゴリ共通のフィールドとして追加、Switch専用の
+   特殊分岐ではない)。
+   **未確認のまま残る点**: 今回取得できた実HTMLは20件全てが"ソフト"(ゲームソフト)
+   のみで、"周辺機器"/"amiibo"/"本体"の実データは未取得のため、これらの行で
+   category_textが実際に"ニンテンドースイッチ周辺機器"のように異なる値を
+   返すのか、それとも"ニンテンドースイッチソフト"のまま変わらない(=ラベルが
+   hardsoftを反映しない)のかは実データで検証できていない。CLAUDE.md 3節に
+   次のPoC項目として記録した。
+
+【検証状況(2026-08-06、遊戯王OCG・デュエル・マスターズカテゴリでの他ジャンル対応確認)】
+category=501080040(遊戯王OCG、tests/fixtures/raw_html/raw_suruga_ya_yugioh.html)・
+category=501080020(デュエル・マスターズ、raw_suruga_ya_duelmasters.html)いずれも、
+2026-08-05のワンピースカード検証時と同じく50108(トレカ・カード類)配下の
+サブカテゴリであり、コード変更無しで20件ずつ正しく抽出できることを実データで確認した。
+管理番号は両カテゴリとも"GU"始まりのみ(ワンピースカードで見られた"GN"等の別接頭辞は
+今回のFixtureには含まれていなかったが、DETAIL_URL_PATTERNが接頭辞非依存のため
+問題にならない)。JAN/型番は両カテゴリとも0件(トレカ系カテゴリ全般の既知の傾向と一致)。
+category_textも"遊戯王/UR/融合モンスター/..."・"デュエルマスターズ/DMR/多色/"のように
+カード種別名が個別に入り、既存実装のまま機能した。[価格上昇中]タグ・メールにてお見積
+(quote_required)・confidence B/D判定もすべて既存実装のまま正しく機能した。
+`CATEGORY_YUGIOH = "501080040"`/`CATEGORY_DUEL_MASTERS = "501080020"`という定数を
+1行ずつ追加しただけで対応でき、2026-08-05時点の「カテゴリID定数を1行追加するだけで
+他ジャンルに対応できる」という一般化した知見が、トレカ系カテゴリ内の別ジャンルでも
+改めて成立することを確認した(CLAUDE.md 3節に一般化した知見として記録)。
+
+【検証状況(2026-08-06、ニンテンドースイッチhardsoft軸(amiibo/本体)でのcategory_text確認)】
+2026-08-05のニンテンドースイッチ検証(category=20038)ではソフトの実データしか
+取得できておらず、`_category_text()`がamiibo/本体でも正しく区別できる値を返すかが
+未確認のまま残っていた。amiibo(tests/fixtures/raw_html/raw_suruga_ya_switch_amiibo.html)・
+本体(raw_suruga_ya_switch_hardware.html)の実HTMLで検証した結果、category_textは
+それぞれ"amiibo"・"ニンテンドースイッチハード"と、ソフトの"ニンテンドースイッチソフト"
+から明確に区別できる値を返すことを確認した(3種とも20件全件で単一の値、混同無し)。
+コード変更は不要だった。JAN/型番もamiibo・本体とも既存実装のまま抽出できることを
+確認済み(本体の型番は"HDH-S-DAZAA"のような英数字混在、amiiboは"NVL-E-AZ2A"や
+"CSZ-4198MH2000"のようなサードパーティライセンス品特有の形式も含め、いずれも
+MODEL_NUMBER_PATTERNの`\\S+`が汎用的にマッチした)。
+**Product Matcherとの連携については別課題**: category_textが商品単位を正しく区別
+できることは確認できたが、この値をapp/matcher/product_matcher.pyの照合スコアリング
+(calc_match_score())へ実際に組み込むかどうかはユーザーと協議の上、今回は見送りとした
+(スキーマ変更(Productへの新規列追加)と照合ロジック配線の両方に影響する範囲の大きい
+変更のため。CLAUDE.md 3節に対応案・理論的リスクとともに記録済み)。
 """
 
 import re
@@ -81,6 +140,17 @@ CATEGORY_TRADING_FIGURES = "50103"
 CATEGORY_ONE_PIECE_CARD = "5010800115"
 # CLAUDE.md 1.3(2026-08-05追記)で確認済み。ガンダムプラモデル専用サブカテゴリ。
 CATEGORY_GUNDAM = "5010401"
+# CLAUDE.md 1.3(2026-08-05追記)で確認済み。ニンテンドースイッチ(ソフト/周辺機器/amiibo/本体
+# 混在)専用カテゴリ。hardsoft(ハード・ソフト)という分類軸は
+# `restrict[]=hardsoft=ソフト|周辺機器|amiibo|本体`のファセットとしてのみ確認できた
+# (実データはソフトのみ、他3種はファセットのリンク上でのみ確認。CLAUDE.md 1.3参照)。
+CATEGORY_NINTENDO_SWITCH = "20038"
+# CLAUDE.md 1.3(2026-08-06追記)で確認済み。50108(トレカ・カード類)配下の
+# 遊戯王OCG専用サブカテゴリ。ワンピースカード同様コード変更不要で動作確認済み。
+CATEGORY_YUGIOH = "501080040"
+# CLAUDE.md 1.3(2026-08-06追記)で確認済み。50108(トレカ・カード類)配下の
+# デュエル・マスターズ専用サブカテゴリ。ワンピースカード同様コード変更不要で動作確認済み。
+CATEGORY_DUEL_MASTERS = "501080020"
 
 # 実データ確認済み(raw_suruga_ya_search.html): hrefは絶対URLではなく
 # "/kaitori/kaitori_detail/{code}"という相対パス。念のため絶対URL表記も許容する。
@@ -192,8 +262,11 @@ class SurugaYaCollector(MarketCollector):
             detail_url = urljoin(BASE_URL, href)
             title = detail_anchor.text(strip=True)
             row_text = row.text(deep=True, separator="\n")
+            category_text = self._category_text(row)
 
-            observations.append(self._build_observation(product_ref, detail_url, title, row_text))
+            observations.append(
+                self._build_observation(product_ref, detail_url, title, row_text, category_text)
+            )
 
         if not observations:
             raise ParseError(f"{raw.url}: 買取価格を1件も抽出できませんでした(構造変更の可能性)")
@@ -206,6 +279,7 @@ class SurugaYaCollector(MarketCollector):
         detail_url: str,
         title: str,
         row_text: str,
+        category_text: str | None = None,
     ) -> MarketObservation:
         code_match = DETAIL_URL_PATTERN.match(detail_url)
         management_number = code_match["code"] if code_match else None
@@ -238,6 +312,11 @@ class SurugaYaCollector(MarketCollector):
             "release_date": release_date,
             "jan": jan,
             "model_number": model_number,
+            # 2026-08-05(ニンテンドースイッチカテゴリ確認時)追記: 行の商品種別ラベル
+            # (例:"ニンテンドースイッチソフト"/"プラモデル"/"フィギュア")。同じ商品名の
+            # キーワードでも全く別の商品単位になりうるケース(技術分析レポート8章の懸念)を
+            # Product Matcher側で区別できるようにするため保持する。
+            "category_text": category_text,
         }
         if PRICE_RISING_TAG in row_text:
             extra["trend"] = "price_rising"
@@ -282,6 +361,19 @@ class SurugaYaCollector(MarketCollector):
             confidence="B" if amount is not None else "D",
             extra=extra,
         )
+
+    @staticmethod
+    def _category_text(row) -> str | None:
+        """行の商品種別ラベル(class="category"のdiv、例:"ニンテンドースイッチソフト")を返す。
+        [価格上昇中]/[新規追加]等のバッジはネストしたfont/strong要素内のテキストのため、
+        deep=Falseで直下のテキストノードのみを取得すればバッジを含まずに済む。ただしバッジ
+        の"["だけが直下に残る(font要素の外側の角括弧)ケースがあるため、"["以降を切り捨てる。
+        """
+        node = row.css_first(".category")
+        if node is None:
+            return None
+        text = node.text(deep=False, strip=True).split("[")[0].strip()
+        return text or None
 
     @staticmethod
     def _find_detail_anchor(row):

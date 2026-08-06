@@ -65,7 +65,16 @@
 |---|---|---|
 | `1kuji.com` | ✅ Bot対策なし、取得可能 | メインの収集対象。トップページの「PICK UP ITEM」に`店頭販売YYYY年MM月DD日より順次発売予定` / `オンライン販売YYYY年MM月DD日HH:MM より販売開始予定`が構造化されて併記されている。正規表現抽出パターンは実装仕様書9章に実コードあり |
 | `bandaispirits.co.jp` | ✅ Bot対策なし、取得可能 | `1kuji.com`の補完・裏取り用。UTF-8、商品詳細ページ(`products/search/detail.php?prd_id=...`)が明確な見出し構造 |
-| `on-line.1kuji.com` | ❌ Bot対策により直接fetch不可（"Site blocked the request"エラー確認済み） | **自動収集の対象外。** 抽選締切・当選発表はここに集中している可能性が高いが取得しない。`apply_url`のリンクのみ保存し、締切は「公式サイトでご確認ください」表示で代替（実装仕様書9章） |
+| `on-line.1kuji.com` | ⚠️ ドメイン全体ではなくパス単位で状態が異なる(2026-08-06詳細確認) | 個別詳細・応募ページ(`ProductDetail.aspx`等)は❌Bot対策により直接fetch不可（"Site blocked the request"エラー確認済み）、**自動収集の対象外**のまま。一方、商品一覧ページ(`Form/Product/ProductList.aspx`)は✅Bot対策に阻まれず取得可能と2026-08-06に判明し、**この1URLのみ例外的にホワイトリスト方式で自動収集対象に追加した**(下記参照)。抽選締切・当選発表は個別詳細ページに集中している可能性が高くこちらは引き続き取得しない。`apply_url`のリンクのみ保存し、締切は「公式サイトでご確認ください」表示で代替（実装仕様書9章） |
+
+**JAN/型番の有無（2026-08-05確認済み）**: `bandaispirits.co.jp`の商品詳細ページ(`products/search/detail.php?prd_id=...`)の「商品詳細」セクションにはJAN/型番は一切含まれていない（価格・発売日のみ）。あるのは`prd_id`/`grp_id`という内部識別子のみで、駿河屋等の外部検索に使える標準コードではない。したがって`app/collectors/sources/ichiban_kuji.py`のnormalize()の`identifiers={}`固定は妥当な実装であり変更不要、一番くじ発の商品は今後も商品名+発売日による照合に依存し続ける。**運用上の含意**: 技術分析レポート11章の商品照合スコアリングにおいて、一番くじ発の商品はJAN一致(+100)/型番一致(+80)の恩恵を受けられないことが確定したため、商品名類似度・発売日近似での照合精度が一番くじジャンルでは特に重要になる。
+
+**【2026-08-06・重要な方針転換】on-line.1kuji.comの商品一覧ページ(`ProductList.aspx`)のみ例外的に自動収集対象へ追加、新商品自動発見に活用**: 従来「on-line.1kuji.comは自動収集の対象外」としていたのは、商品詳細・応募ページ(`ProductDetail.aspx`等)がBot対策でブロックされることを根拠にした判定だった。同じドメイン内の商品一覧ページ(`https://on-line.1kuji.com/Form/Product/ProductList.aspx`)を実際に取得した生HTML(`tests/fixtures/raw_html/raw_online_1kuji_productlist.html`)を確認したところ、Bot対策に阻まれず正常に取得でき、確認時点で販売中の全22商品のpid・商品名・価格・販売期間開始日時が構造化されて含まれていることを確認した。p-bandai.jp(1.2節、トップページは取得可・個別商品ページのみAkamai保護)と同様、同一ドメイン内でもパス単位で保護の有無が異なる非対称な構成であり、0節方針4「Bot対策サイトは正面突破しない」はブロックされていないページの利用まで妨げるものではない(ユーザー確認済み)。
+- `app/collectors/sources/ichiban_kuji.py`の`fetch()`を、on-line.1kuji.com宛リクエストは`ONLINE_1KUJI_PRODUCT_LIST_URL`との完全一致(ホワイトリスト)のみ許可する形に変更した。クエリパラメータが付加されたバリエーションも含め、それ以外のon-line.1kuji.comパスは引き続き全面禁止。
+- 取得するのはpid・商品名・価格・販売期間開始日時のみ。抽選締切・当選発表は引き続き取得できないため`deadline_at`は常にNone(`release_events.deadline_source`は既定値`DeadlineSource.UNKNOWN`が自動適用される、追加実装不要)。**一番くじONLINEは抽選応募制ではなく購入型のオンラインくじという性質のため、そもそも「締切」の概念が存在しない可能性があるが、この点は実データからは確認できていない(要継続検証)。**
+- `apply_url`/`product_url`には`ProductDetail.aspx`への絶対URLを保存するのみで、本Collectorがこれをfetchすることは無い(bandaispirits.co.jp連携と同じ既存パターン)。
+- `target_urls`に追加したため、Celery Beatの`ichiban-kuji-every-6-hours`スケジュール経由で6時間ごとに自動巡回される(1kuji.comトップページと同じ巡回間隔)。
+- テスト13件追加(単体18件中)、実Fixture(22件)・合成HTML(2件、`pid`が数字のみ/`sap_`接頭辞付き両方の形式をカバー)の両方で検証済み。
 
 ### 1.2 プレミアムバンダイ（p-bandai.jp）【方針変更あり】
 
@@ -80,7 +89,7 @@
 
 - ✅ Bot対策なし、UTF-8、取得可能。想定より扱いやすいことを確認。
 - 検索エンドポイント: `https://www.suruga-ya.jp/kaitori/search_buy?category={カテゴリID}&search_word={キーワード}`
-- 確認済みカテゴリID: `501`=おもちゃ・ホビー全体、`50108`=トレカ・カード類、`50104`=プラモデル、`50102`=フィギュア、`50103`=トレーディングフィギュア、`5010800115`=ワンピースカードゲーム（`50108`配下のサブカテゴリ）、`5010401`=ガンダムプラモデル（`50104`配下のサブカテゴリ。他は`category=501`ページのカテゴリ一覧から機械的に取得可能）
+- 確認済みカテゴリID: `501`=おもちゃ・ホビー全体、`50108`=トレカ・カード類、`50104`=プラモデル、`50102`=フィギュア、`50103`=トレーディングフィギュア、`5010800115`=ワンピースカードゲーム、`501080040`=遊戯王OCG、`501080020`=デュエル・マスターズ（いずれも`50108`配下のサブカテゴリ）、`5010401`=ガンダムプラモデル（`50104`配下のサブカテゴリ）、`20038`=ニンテンドースイッチ（他は`category=501`ページのカテゴリ一覧から機械的に取得可能）
 - 検索結果テーブルの構造（1行 = 1商品）:
   ```
   商品画像 | 種類/タイトル（ブランド/レアリティ/属性/弾名 + 型番[レアリティ]:カード名） | 発売日 + 型番 + 管理番号 | 買取価格 | 詳細リンク
@@ -92,6 +101,11 @@
 - **JANコードは一覧ページの時点で取得可能なケースがある**（「発売日/型番/JANコード/管理番号」列に13桁の数値として含まれる）。ただし全商品にあるわけではない(トレカ系のFixtureサンプルでは記載なし)ため、`product_identifiers`はnullable前提のままで良い。管理番号の形式は`GU`+数字／数字のみの2種類を確認。詳細はFixture`suruga_ya_jan_confirmation_20260803.md`を参照。
 - **【2026-08-05・一般化した知見】駿河屋Collectorはカテゴリ変更のみで他ジャンルにも対応可能と確認済み**: category=5010800115(ワンピースカードゲーム)で本番ConoHa VPSから実際に取得した生HTML(`tests/fixtures/raw_html/raw_suruga_ya_onepiece.html`)を、`app/collectors/markets/suruga_ya.py`のパース処理に一切手を入れずそのまま通しても20件全件を正しく抽出できた。このデータには管理番号が`GU`始まりと`GN`始まりの両方が混在していたが、主経路の`DETAIL_URL_PATTERN`(`[A-Za-z0-9]+`)が接頭辞非依存でURLから直接抽出しているため、`GU`限定の`MANAGEMENT_NUMBER_PATTERN`(通常到達しないテキストフォールバック)を変更する必要は無かった。`[価格上昇中]`タグ・メールにてお見積・confidence B/D判定もすべて既存実装のまま正しく機能。カテゴリIDはコンストラクタ引数(`category`)で既に外部化されており、今回`CATEGORY_ONE_PIECE_CARD = "5010800115"`という定数を1行追加しただけで対応できた。**したがって、今後さらにジャンル(他のトレカ・ホビー系カテゴリ等)を追加する際は、`suruga_ya.py`にカテゴリID定数を1行追加するだけでよく、パース処理側のコード変更は原則不要という設計になっている。**
 - **【2026-08-05・型番(型式)の扱い】ガンダムカテゴリ(category=5010401)には「型番」が独立した4要素目として存在し、専用パターンを追加して対応した**: category=5010800115(トレカ)の検証時点では「発売日/型番/JANコード/管理番号」列は最大3要素(型番が独立して現れない)だったが、category=5010401(プラモデル)では4要素すべて埋まるケース(例: `2026/04/25<br>5072030<br>4573102720306<br>603227273`)がある。既存の`JAN_AND_ID_PATTERN`(JAN13桁+直後のトークン)/`MANAGEMENT_NUMBER_PATTERN`(URLベースが主経路)はこの型番をJAN・管理番号と誤認してはいなかった(型番は7桁前後でJANの桁数と衝突しない、管理番号はURLから独立抽出のため)が、型番自体はどのパターンでも捕捉されていなかった。新たに`MODEL_NUMBER_PATTERN`(「発売日の直後・13桁JANの直前」という位置関係で識別。トレカ系の「発売日+JAN+管理番号」3要素ケースでは直後のトークンがJANそのものになるため誤マッチしないことを確認済み)を追加し、`extra["model_number"]`として公開するようにした(20件中19件で抽出、残り1件は型番欄自体が空という実データの仕様)。**`ProductIdentifierType.MODEL`("model")としてのDB永続化(`product_identifiers`テーブルへの書き込み)は未着手。** 現状はJANを含めどの識別子種別についても`product_identifiers`への書き込み処理自体が存在しない(`app/pipeline/market_matching.py`は商品名の類似度のみでマッチングしている)ため、型番だけを先に永続化する場合は商品照合ロジックの拡張を伴う設計判断が必要になる(CLAUDE.md 0.5の「商品照合の確定ロジックに関わる仕様変更」に該当しうるため、着手前に協議推奨)。
+- **【2026-08-05・ニンテンドースイッチカテゴリ(`category=20038`)対応、コード変更あり】型番の英数字混在フォーマットはコード変更不要、商品単位混同への対応として`category_text`を新設**: category=20038で取得した実HTML(`tests/fixtures/raw_html/raw_suruga_ya_switch.html`)で2点確認した。
+  1. **型番フォーマット**: ガンダムでは型番が数字のみ(例:`5072030`)だったが、ニンテンドースイッチでは`HAC-P-BQPYA`のような英数字+ハイフン混在形式だった。`MODEL_NUMBER_PATTERN`の`(?P<model>\S+)`は元々非空白文字全般にマッチする実装(数字限定ではなかった)だったため、**コード変更無しで実データ20件全件を正しく抽出できることを確認した**(JAN/管理番号との誤認も無し)。
+  2. **hardsoft分類軸(商品単位の混同対策)**: ニンテンドースイッチカテゴリには`restrict[]=hardsoft=ソフト|周辺機器|amiibo|本体`という分類軸があり、同じ「Nintendo Switch」というキーワードでもソフトと周辺機器・本体は全く別の商品単位になりうる(技術分析レポート8章で懸念されていた「商品単位の混同」が実際に起こりうるカテゴリ)。既存実装はこの軸を`extra`のどこにも保持していなかったため、全カテゴリ共通で存在する行内の商品種別ラベル(`<div class="category">`、例:ガンダムでは「プラモデル」)を`_category_text()`で抽出し、`extra["category_text"]`として新たに公開するようにした(Switch専用の特殊分岐ではなく、既存の`raw_suruga_ya_gundam.html`等でも同様に機能することをテストで確認済み)。ニンテンドースイッチの実データ20件は全て`category_text == "ニンテンドースイッチソフト"`だった。
+  - ~~未確認のまま残る点~~ → **確認済み(2026-08-06)。amiibo(`raw_suruga_ya_switch_amiibo.html`)・本体(`raw_suruga_ya_switch_hardware.html`)の実HTMLで検証した結果、`category_text`はそれぞれ`"amiibo"`・`"ニンテンドースイッチハード"`という、ソフトの`"ニンテンドースイッチソフト"`とは明確に異なる値を正しく返すことを確認した(3種とも20件全件で単一の値、混同無し)。ラベルはhardsoftを正しく反映しており、`_category_text()`自体は商品単位混同対策のデータ源として機能する。ただし、この値をProduct Matcher側で実際に使うかどうかは別課題(下記参照・3節に記録)。**
+- **【2026-08-06・一般化した知見の再確認】遊戯王OCG(`category=501080040`)・デュエル・マスターズ(`category=501080020`)でもコード変更無しで動作確認済み**: いずれも`50108`(トレカ・カード類)配下のサブカテゴリで、実HTML(`tests/fixtures/raw_html/raw_suruga_ya_yugioh.html`・`raw_suruga_ya_duelmasters.html`)を`app/collectors/markets/suruga_ya.py`に一切手を入れずそのまま通しても20件ずつ正しく抽出できた。管理番号は両カテゴリとも`GU`始まりのみ、JAN/型番は0件(トレカ系カテゴリ全般の既知の傾向と一致)、`category_text`(`_category_text()`)も個別カード種別名がそのまま入り既存実装のまま機能。`[価格上昇中]`タグ・メールにてお見積・confidence B/D判定も無修正で機能した。`CATEGORY_YUGIOH = "501080040"`/`CATEGORY_DUEL_MASTERS = "501080020"`を1行ずつ追加しただけで対応完了。**TCG系カテゴリはカテゴリID追加のみで拡張できる可能性が高い**: 駿河屋のTCG親カテゴリ(`category=5010800`)には遊戯王・デュエマ以外にも50種類以上のトレーディングカードゲーム(ヴァイスシュヴァルツ、ヴァンガード、デジモンカードゲーム、シャドウバース エボルヴ等)が存在することが分かっている。ワンピースカード・遊戯王OCG・デュエル・マスターズの3カテゴリで同一の構造(GU管理番号・JAN/型番無し・category_textが機能)が繰り返し確認できているため、他のTCGカテゴリも同じ構造であれば`suruga_ya.py`にカテゴリID定数を1行追加するだけで対応できる可能性が高い。実際の需要に応じて追加検討すること(全種類を先回りして網羅する必要は無い)。
 
 ### 1.4 ポケモンセンターオンライン（pokemoncenter-online.com）【最重要・優先度見直し対象】
 
@@ -101,7 +115,7 @@
   **`各種期間`の中に「抽選応募受け付け期間」「抽選結果発表日」「購入および、支払い期間」「商品のお届け時期」が
   すべて日時付きで記載されている。** 一番くじで欠けていた締切・当選発表・購入期限が、ここでは全部取れる。
 - 在庫状況（「品切れ」「予約」等のラベル）、価格、購入上限（「お一人様1点限り」）も同じページから取得可能。
-- 商品コードがJANコードかは未確認（形式からは内部管理コードの可能性が高い）。
+- **商品コードとJANコードの関係(2026-08-05確認済み、3節参照)**: 先頭2桁で条件付き一致。`45`/`49`始まり(GS1 Japan管理の正規事業者コード範囲、通常販売商品で確認)はJANコードとして扱えるが、`99`始まり(GS1のインストア専用疑似コード範囲、抽選販売商品で確認)は内部管理コード相当でJAN一致には使えない。サンプル5件からの経験則であり、GS1公式文書での裏取りではないため要継続検証。
 - 商品一覧ページ（カテゴリ別・新着別）は未取得。個別ページのURLパターンから商品コードを収集する
   巡回設計が必要（一覧ページの構造確認はPoC-6相当として別途必要）。
 - Fixture: `pokemon_center_online_product_20260803.md`（正規表現抽出パターンの詳細もこちらに記載）
@@ -206,7 +220,7 @@
 | 1 | リポジトリ初期化・Docker Compose | 実装仕様書 Prompt 1 | ✅ 完了 |
 | 2 | 基本DBモデル + Alembicマイグレーション | 実装仕様書 Prompt 2・1章 | ✅ 完了 |
 | 3 | SourceCollector基底クラス実装 | 実装仕様書 Prompt 3・9章 | ✅ 完了 |
-| 4 | 一番くじCollector実装（`1kuji.com`+`bandaispirits.co.jp`、`on-line.1kuji.com`除外） | 実装仕様書9章の正規表現パターン | ✅ 完了（トップページは本番VPS生HTMLで検証済み・CSSセレクタベースに書き換え。bandaispirits.co.jp詳細ページはFixtureベースのまま未検証、1.5節参照） |
+| 4 | 一番くじCollector実装（`1kuji.com`+`bandaispirits.co.jp`、`on-line.1kuji.com`は個別詳細・応募ページのみ除外） | 実装仕様書9章の正規表現パターン | ✅ 完了（トップページは本番VPS生HTMLで検証済み・CSSセレクタベースに書き換え。bandaispirits.co.jp詳細ページはFixtureベースのまま未検証、1.5節参照。⚠️on-line.1kuji.comの除外範囲はタスク18で商品一覧ページのみ例外化） |
 | 5 | プレミアムバンダイCollector実装 | 実装仕様書 Prompt 3拡張 | ❌ 断念（Akamai Bot Managerにより個別商品ページもJS実行必須と判明、CLAUDE.mdの方針上ここでは正面突破しない） |
 | 6 | 駿河屋Market Collector実装 | 実装仕様書10章・Prompt 4 | ✅ 完了（本番VPS生HTMLで検証済み。相対href・href=None対応の修正済み、1.5節参照。JANコード抽出(タスク15)も実データで確認済み） |
 | 7 | 地域解決ロジック実装（`resolve_region()`、`fulfillment_type`フィルタ） | 実装仕様書1.3節、4.3節 | ✅ 完了 |
@@ -220,6 +234,10 @@
 | 15 | 駿河屋CollectorへJANコード抽出を追加 | 本ファイル1.3節のFixture(`suruga_ya_jan_confirmation_20260803.md`) | ✅ 完了（本番VPS生HTMLでも抽出できることを確認済み） |
 | 16 | Discord Bot Interaction実装（応募済み/ウォッチ/非表示ボタン） | 実装仕様書14章 | ✅ 完了（discord.pyのゲートウェイ実接続のみ未検証） |
 | 17 | 一番くじ/駿河屋/ポケモンセンターオンラインの本番VPS実データ検証・修正 | `docs/verification_checklist.md`、`scripts/verify_collectors.py` | ✅ 完了（詳細は1.5節参照） |
+| 18 | on-line.1kuji.com商品一覧ページ(`ProductList.aspx`)の自動収集追加(新商品自動発見) | 本ファイル1.1節 | ✅ 完了（本番で`worker`/`beat`再起動後、手動トリガーで実機検証済み。success_count=37(1kuji.comトップ15+商品一覧22)、他パスへのアクセス無し、詳細は1.1節参照） |
+| 19 | 手動検証専用E2Eタスク(`run_live_e2e_verification`)実装(収集→DB反映→商品照合→Profit Engine→Opportunity→通知判定) | 本ファイル7〜9節 | ✅ 完了（Beat Scheduleには未登録の手動検証専用タスク。合成MarketObservationを使用） |
+| 20 | 定期実行タスク(`run_ichiban_kuji_collector`/`run_suruga_ya_price_rising_scan`)のDB反映・Opportunity生成・通知判定への結線 | 本ファイル12節 | ✅ 完了（タスク13・19の既存関数をそのまま呼び出す形で結線。実データで新商品発見→DB反映→Opportunity生成→Discord送信までの一気通貫を実機確認済み。詳細は12節参照） |
+| 21 | ポケモンセンターオンライン新商品一覧ページの発見・商品コード自動抽出(段階1、DB反映・Beat Schedule登録は含まず) | 本ファイル13節 | ✅ 完了（段階1のみ。`discover_new_products()`実装、Fixture2種(一覧275件+個別1件)によるテスト5件追加、全て実データ検証済み。段階2(Beat Schedule登録・DB反映)は別タスクとして依頼待ち、詳細は13節参照） |
 
 **タスク7・8の分離について**: 当初「タスク7 = Product Matcher実装（地域解決ロジック含む）」と
 一つにまとめていたが、実装仕様書Prompt 4が地域解決ロジックのみを指しているのに対し、
@@ -245,16 +263,28 @@
 - ~~ポケモンセンターオンラインの実データ確認~~ → **確認済み(1.4節)。締切・当選発表・購入期限すべて取得可能、優先度を最上位に格上げ**
 - ~~駿河屋の商品詳細ページのJAN/型番の取得可否~~ → **確認済み(1.3節・Fixture`suruga_ya_jan_confirmation_20260803.md`)。JANコードは一覧ページの時点で取得可能なケースがある（ただし全商品ではない、nullable前提の設計のままで良い）。管理番号の形式が`GU`+数字／数字のみの2種類確認、文字列型で保持すること**
 - ~~プレミアムバンダイの個別商品ページ（`p-bandai.jp/item/item-{ID}/`）のFixture再取得~~ → **確認済み・断念確定(1.2節・タスク5、2026-08-05)。個別商品ページもAkamai Bot Manager配下でJS実行必須と判明、実データは取得不可。プレバンCollectorはここで正式に断念**
-- ポケモンセンターオンラインの商品一覧ページ（カテゴリ別・新着別）のURL・構造確認（個別ページのURLパターンから商品コードを収集する巡回設計に必要、タスク14の報告参照）
-- **【2026-08-05・重要度が上がった既存項目】ポケモンセンターオンラインの商品コード(13桁)がJANコードと一致するかの確認**: 5節でproduct_identifiers永続化パイプラインが実装され、JAN一致(+100)による自動一致が実際に機能するようになったため、この確認の優先度が上がっている。一致するなら`identifiers={}`固定(`app/collectors/sources/pokemon_center_online.py`)をJAN設定に変更するだけで、Source Collector側からもJANが供給されるようになる。
-- **【2026-08-05・新規】一番くじ(bandaispirits.co.jp商品詳細ページ)にJAN/型番相当の情報が含まれているか未確認**: 現状`app/collectors/sources/ichiban_kuji.py`のnormalize()も`identifiers={}`固定。5節の実装で判明した通り、仕入れ側(一番くじ/ポケセン)・相場側(駿河屋)の双方にJAN/型番が揃わない限りJAN一致ロジックの実効性は限定的（現状は相場側の駿河屋のみ識別子を持つため、同一商品が仕入れ側にも登場した際の自動一致にはまだ寄与できていない）。bandaispirits.co.jpの商品詳細ページ(1.1節・1.6節でFixture取得済み)にJAN/型番相当のフィールドがあるか、生HTMLを再確認する必要がある。
+- ~~ポケモンセンターオンラインの商品一覧ページ（カテゴリ別・新着別）のURL・構造確認~~ → **確認済み・段階1実装完了(13節、2026-08-06、タスク21)。新商品一覧ページ`/search/?prefn1=releaseType&prefv1=1&srule=top-new-product`を発見、Bot対策なしで取得可能、`sz`パラメータで1リクエストにつき最大275件(2026-08-06時点の全件)を取得できることを確認した**
+- ~~ポケモンセンターオンラインの商品コード(13桁)がJANコードと一致するかの確認~~ → **確認済み・先頭2桁による条件付き一致(`app/collectors/sources/pokemon_center_online.py`、2026-08-05)**: サンプル5件で確認。通常販売商品3件(`4521329432069`/`4521329413051`/`4521329338453`)は全て`45`始まり、抽選販売商品2件(`9900000006082`/`9900000006808`)は全て`99`始まりだった。JAN-13の国コード部のうち`45`/`49`はGS1 Japan管理の日本の正規事業者コード範囲、`99`はGS1がインストアマーキング(店舗外で通用しない疑似コード)用に予約している範囲にあたる。この対応関係に基づき、`_classify_product_code()`で先頭2桁が`45`/`49`の場合のみ`identifiers["jan"]`として供給し、それ以外(`99`始まり等)は`extra["product_code_type"] = "internal_code"`として値は保持しつつJAN一致スコアリング(技術分析レポート11.2、JAN一致+100)の対象からは外すようにした。**注意: この判定はサンプル5件からの経験則であり、GS1の公式文書で裏取りしたものではない。高確率だが100%の保証ではなく、今後別の先頭2桁パターンが実データで見つかった場合は判定ロジックの見直しが必要になる(要継続検証)。**
+- ~~一番くじ(bandaispirits.co.jp商品詳細ページ)にJAN/型番相当の情報が含まれているか未確認~~ → **確認済み・JAN/型番取得不可、商品名+発売日による照合に依存し続ける(1.1節、2026-08-05)**: bandaispirits.co.jpの商品詳細ページの「商品詳細」セクションには価格・発売日のみで、JAN/型番は一切含まれていない。あるのは`prd_id`/`grp_id`という内部識別子のみで、駿河屋等の外部検索に使える標準コードではない。`app/collectors/sources/ichiban_kuji.py`のnormalize()の`identifiers={}`固定は変更不要。**運用上の含意**: 5節で判明した通り仕入れ側・相場側の双方にJAN/型番が揃わない限りJAN一致ロジックの実効性は限定的だが、一番くじについてはこの前提が今後も恒久的に成立しないことが確定した。技術分析レポート11章の商品照合スコアリングにおいて、一番くじ発の商品はJAN一致(+100)/型番一致(+80)の恩恵を今後も受けられないため、商品名類似度・発売日近似での照合精度が一番くじジャンルでは特に重要になる。
 - ~~Discord Bot側のInteraction実装（実装済み。discord.pyのゲートウェイ実接続のみ未検証、タスク16の報告参照）~~ → **確認済み(7節・8節、2026-08-05)。常時起動Bot(`app/bot/main.py`)経由でゲートウェイ実接続・Embed+ボタン付きメッセージ送信を実機確認。ユーザーが実際に3ボタン(応募済み/ウォッチ/非表示)を押し、`lottery_entries`/`watchlists`への行追加・`opportunities.status='hidden'`へのDB反映まで確認済み。途中`api_base_url`の既定値がbotコンテナから到達不能で「応答しませんでした」になるバグを発見・修正(8節参照)**
-- **【2026-08-05・新規、別タスクとして記録】Discord操作(応募済みにする/ウォッチリスト登録/非表示/マージ確定API)には権限チェックが一切無い**: `app/notification/interaction_view.py`の既存3ボタン、および6節で追加した`POST /manual-review-tasks/{id}/resolve`(照合の確定/棄却=商品Productのマージ)のいずれも、`verify_api_key`(単一ユーザー前提のAPIキー認証)以外のユーザー単位の権限チェックを持たない。個人利用の現段階では実害は小さいが、特にマージ確定操作は後戻りしにくいため、複数ユーザー対応(Phase5)までに必ず対応が必要。
+- **【2026-08-05・新規、別タスクとして記録】Discord操作(応募済みにする/ウォッチリスト登録/非表示/マージ確定API/照合を確定する/別商品として分離)には権限チェックが一切無い**: `app/notification/interaction_view.py`の既存3ボタン、10節で追加した「照合を確定する」/「別商品として分離」の2ボタン、および6節で追加した`POST /manual-review-tasks/{id}/resolve`(照合の確定/棄却=商品Productのマージ)のいずれも、`verify_api_key`(単一ユーザー前提のAPIキー認証)以外のユーザー単位の権限チェックを持たない。個人利用の現段階では実害は小さいが、特にマージ確定操作は後戻りしにくいため、複数ユーザー対応(Phase5)までに必ず対応が必要。
 - **【2026-08-05・新規、別タスクとして記録】`OpportunityActionView`のボタンはcustom_idを明示していないため、Botプロセスの再起動を跨いで機能しない**: discord.pyの永続View(`bot.add_view()`+固定`custom_id`)にしていないため、送信済みメッセージのボタンはそれを送った`discord.Client`インスタンスがプロセス内に生き続けている間しか反応しない。`app/bot/main.py`(常時起動Bot)が再起動すると、それ以前に送信済みのメッセージのボタンは全て無反応になる(見た目上はボタンが残ったままなのに押しても反応しない、静かな劣化)。実運用でBotの再起動(デプロイ・クラッシュ等)が発生する前提なら、`custom_id`を`event_id`/`opportunity_id`を埋め込んだ固定文字列にし、`on_ready`等で`bot.add_view()`により永続化する対応が必要。
 - ~~一番くじ/駿河屋/ポケモンセンターオンラインの本番VPS実データ検証~~ → **確認済み(1.5節・タスク17)。判明した問題は修正済み**
 - ~~bandaispirits.co.jpの商品詳細ページの生HTML取得・検証~~ → **確認済み(1.6節・タスク18)。価格/発売日/商品名は修正不要、商品画像(image_urls)がヘッダーロゴを誤取得していた不具合を発見・修正済み**
 - ~~駿河屋の鑑定品価格(【PSA/GEM MT 10】等)の実データでの動作確認~~ → **確認済み(1.6節・タスク18)。既存実装のまま正しく機能、修正不要**
 - ~~ポケモンセンターオンラインの通常販売ページ(「各種期間」セクションが無いページ)の実データ確認~~ → **確認済み(1.6節・タスク18)。event_type=NORMAL_SALE判定・価格/商品名/在庫/購入上限の抽出とも既存実装のまま正しく機能、修正不要**
+- ~~駿河屋Collectorのニンテンドースイッチカテゴリ(category=20038)対応確認~~ → **確認済み(1.3節、2026-08-05)。型番の英数字混在フォーマット(`HAC-P-BQPYA`)はコード変更不要で抽出できることを確認。hardsoft分類軸(商品単位の混同対策)として`extra["category_text"]`を新設し、既存カテゴリ含め全カテゴリ共通で機能することを確認済み**
+- ~~駿河屋Collectorの`category_text`が「周辺機器」「amiibo」「本体」でも実際に区別できる値を返すか未確認~~ → **確認済み(1.3節、2026-08-06)。amiibo/本体の実HTML(`raw_suruga_ya_switch_amiibo.html`/`raw_suruga_ya_switch_hardware.html`)で検証した結果、`category_text`はそれぞれ`"amiibo"`/`"ニンテンドースイッチハード"`と、ソフトの`"ニンテンドースイッチソフト"`から明確に区別できる値を返すことを確認した。「周辺機器」のみ実データ未取得のまま残っているが、amiibo/本体で仕組み自体が正しく機能することは確認済みのため優先度は高くない。**
+- **【2026-08-06・新規、別タスクとして記録・着手前に設計相談が必要】`category_text`(商品単位を示す値)がProduct Matcher(商品照合スコアリング)に一切配線されていない**: `_category_text()`はソフト/amiibo/本体を正しく区別できる値を返すことを確認済み(1.3節)だが、`app/matcher/product_matcher.py`の`MatchCandidate`/`ProductAttributes`にはこれに相当するフィールドが存在せず、`calc_match_score()`もcategory_textを一切比較していない。また`Product`モデル(`app/db/models/product.py`)には`category_id`(`categories`テーブルへのFK)という列が既に存在するが、パイプライン全体でどこからも書き込まれず参照もされていない、配線されていない列であることも判明した。**理論的リスク**: ソフト/本体/amiiboのように明確に異なる商品単位の商品でも、商品名が似ていれば(例: シリーズ名を共有する本体とソフト)category_textによる強制減点が一切かからないため、商品名類似度だけで誤ってNEEDS_REVIEW以上のスコアに達しうる(技術分析レポート8章で懸念されていた「商品単位の混同」に相当)。ただし現時点でこれが実際に誤自動一致を引き起こした実例は確認されていない。**対応案**: 既存の`unit_mismatch`と同様の強制不一致パターン(スコアの上限キャップ)を踏襲するなら、(1)`products`に`category_text`相当の新規列を追加するマイグレーション、(2)`app/pipeline/ingest.py`側でProduct作成/確定時に書き込む配線、(3)`app/pipeline/market_matching.py`側で`calc_match_score()`に渡す配線、の3点が必要になる。**この対応はCLAUDE.md 0.5「商品照合の確定ロジックに関わる仕様変更」に該当するため、実際に問題が起きるか具体的な計画ができてから、着手前に必ず設計を相談すること(スキーマ変更と照合ロジックの両方に影響する範囲の大きい変更のため、今回は見送りと判断した)。**
+- ~~駿河屋Collectorの遊戯王OCG・デュエル・マスターズカテゴリ対応確認~~ → **確認済み(1.3節、2026-08-06)。いずれも50108配下のトレカ系サブカテゴリで、コード変更無しで動作確認済み(`CATEGORY_YUGIOH`/`CATEGORY_DUEL_MASTERS`を1行ずつ追加しただけで対応完了)。一般化した知見: TCG系カテゴリはカテゴリID追加のみで拡張できる可能性が高い。駿河屋のTCG親カテゴリ(`category=5010800`)には遊戯王・デュエマ以外にも50種類以上のトレーディングカードゲーム(ヴァイスシュヴァルツ、ヴァンガード、デジモンカードゲーム、シャドウバース エボルヴ等)が存在するが、ワンピースカード・遊戯王OCG・デュエル・マスターズの3例で同一構造(GU管理番号・JAN/型番無し・category_textが機能)が繰り返し確認できているため、他のTCGカテゴリも同様の対応で拡張できる可能性が高い。全種類を先回りして網羅する必要は無く、必要に応じて追加検討すればよい**
+- ~~on-line.1kuji.comの商品一覧ページ(ProductList.aspx)が取得可能か~~ → **確認済み・自動収集対象に追加(1.1節、2026-08-06)。個別詳細・応募ページはBot対策により引き続き取得不可だが、商品一覧ページのみ例外的に取得可能と判明し、ホワイトリスト方式で新商品自動発見用に`target_urls`へ追加した**
+- **【2026-08-06・新規】一番くじONLINEに「締切」の概念が存在するか未確認**: 一番くじONLINEは抽選応募制ではなく購入型のオンラインくじという性質のため、そもそも「応募締切」という概念自体が存在しない可能性がある(1.1節参照)。商品一覧ページ(ProductList.aspx)からは締切に相当する情報が一切取得できていないが、これが「そもそも締切という概念が無いから」なのか「一覧ページには無いだけで個別詳細ページ(Bot対策で取得不可)には存在する」のかは実データからは判別できていない。現状は`deadline_at=None`(`deadline_source=UNKNOWN`)のまま扱っており、動作上の問題は無いが、事実として未確認のまま残っている。
+- ~~on-line.1kuji.com商品一覧の収集結果はDBへ一切反映されない~~ → **解消済み(12節、2026-08-06、タスク20)。駿河屋も含め定期実行タスク2つとも同じ構造的欠落だったことを確認した上で、ingest_normalized_item()/match_observation_to_product()/build_and_score_opportunity()/evaluate_notification()への結線を実施し、実データで新商品発見→DB反映→Opportunity生成→Discord送信までの一気通貫を実機確認済み**
+- **【2026-08-06・新規、タスク20の実機検証で判明】Product Matcherの一番くじ商品に対する商品名類似度が実用上機能していない**: 駿河屋の一番くじ関連リストは「孫悟空＆ブルマ＆クリリン 潜水艇「一番くじ ドラゴンボール EX 対決!レッドリボン軍」D賞 フィギュア」のような個別景品名(シリーズ名を含むがそれ以外の文字列が多い)で出品される。既存の`_title_similarity()`(`SequenceMatcher`による全体文字列の編集距離ベース)ではシリーズ名一致分のスコアが希釈されてしまい、実データ6商品(ゴジラ MACHINE CHRONICLE/ゴジラ 最恐怪獣王列伝/オーバーロード/ジョジョの奇妙な冒険 STEEL BALL RUN/ウルトラマン 60th Anniversary/ドラゴンボール EX 対決！レッドリボン軍)で確認したところ、いずれもNEEDS_REVIEW閾値(40点)未満(score=0〜5)にしかならなかった。改善するなら「観測タイトルがProduct名を部分文字列として含む場合の加点」等が考えられるが、商品照合の確定ロジックに関わる変更のため着手前に協議が必要(CLAUDE.md 0.5)。
+- **【2026-08-06・新規、タスク20の実機検証で判明】`evaluate_notification()`の「最良売却先」表示が仕入れ側Source名になっている**: `app/pipeline/notify.py`の`OpportunityView`構築で`best_channel_name=source.name`となっており、`build_and_score_opportunity()`に渡した実際の売却チャネル名(例:`"suruga_ya"`)が表示に反映されない(仕入先と最良売却先が常に同じ値になる)。今回のタスク(20)とは無関係な既存コードの問題のため修正はしていない。
+- **【2026-08-06・新規、タスク20の実機検証で判明】Discord自動送信の仕組みが未実装**: `run_ichiban_kuji_collector`/`run_suruga_ya_price_rising_scan`はshould_send=Trueのembedを返り値に含めるところまでで、これを常時起動Bot(`app/bot/main.py`)が定期的に取得して実際に送信する仕組みはまだ無い(常時起動Botは現状`--send-test-notification`起動時に1回送るのみ)。新商品が完全に自動でDiscordへ届くには、常時起動Bot側にこれらのタスクの結果を定期的に取得して送信する仕組みが別途必要。
+- **【2026-08-06・新規、テスト用DBが本番と分離されていない設計上のギャップ】専用のテスト用DBが存在せず、`tests/integration/conftest.py`の`db_session`フィクスチャは本番と全く同じ`app.config.settings.database_url`に接続し、ネストしたトランザクション+rollbackのみで隔離している(接続先そのものは本番DBと同一)。この設計自体はSQLAlchemyの標準的なテスト分離パターンであり、`db_session`を経由する限り安全に機能する(実際、`test_incident_recollection_dedup.py`等はこの隔離のもとで本番の実データに対して安全に検証できている)。**しかし12節の事故の本質はまさにこの前提が崩れたケースだった**: `tests/unit/test_scheduler.py`はCeleryタスク関数を直接呼び出す設計で、`db_session`フィクスチャを一切経由せず、タスク内部が独自にDBセッションを開く(アプリ本体と同じ経路で本番へ直接接続する)。そのためrollback保護の外側で本番へ実際に書き込まれた。**今後も同じ構造のリスクが残っている**: `db_session`を経由しないテスト(Celeryタスクや将来追加されるスクリプト類を直接呼ぶテスト全般)は、書き込みが本番へ確定してしまう経路になりうる。タスク20では該当箇所をnetwork層のmonkeypatchで塞いだ(12節参照)が、これは個別対応であり、同種のテストが今後増えるたびに同じ注意が必要になる。**将来的な検討課題**: `docker-compose.yml`にテスト専用DBサービス(例: `test-db`、本番`db`とは別のPostgreSQLコンテナ+別ボリューム)を追加し、テスト実行時は`DATABASE_URL`をそちらに向ける構成にすれば、rollbackに頼らずコンテナレベルで本番データと完全に分離できる。現時点では未着手(この記録のみ、着手はしていない)。
+- **【2026-08-06・タスク20の事故データ(Product 32件・ReleaseEvent 36件)の再収集時デデュープ検証】** `tests/integration/test_incident_recollection_dedup.py`を追加し、実際に本番DBへ書き込まれたこの36件のReleaseEvent全件について「もう一度同じページを収集したら」を再現して検証した。全件が`match_or_create_product()`のexact_match経路(商品名の完全一致)でAUTO_MATCHとなり既存のProduct/ReleaseEventへ正しく紐づき、Product/ReleaseEventのいずれも増えないことを確認した(再収集前後で32件/36件のまま)。**同時に判明した限界**: 一番くじ商品は識別子(JAN/型番)を持たず(1.1節)、`Product.release_date`もどこからも書き込まれないため、`calc_match_score()`側の名前類似度による加点は理論上の上限が+40点(`NEEDS_REVIEW_THRESHOLD`と同値)にしかならず、AUTO_MATCH(90点)/HIGH_PROBABILITY_MATCH(70点)には**原理的に届かない**。つまり一番くじ商品の重複防止は事実上`match_or_create_product()`のexact_match(文字列完全一致)経路のみに依存しており、fuzzy matching側はこれを一切補完できない。空白のゆれ自体は`_title_similarity()`が事前に空白を除去するため無害だが、それ以外の表記変動(全角/半角、記号の差、サイト側のtitle文言変更等)でexact_matchが外れた場合、確実にNEEDS_REVIEWへ落ちて重複Productが作られる。改善するなら商品照合の確定ロジックに関わる変更のため、着手前に協議が必要(CLAUDE.md 0.5、282行目の駿河屋照合精度の課題と同根)。
 
 これらは実装を進めながら随時実データで確認し、本ファイルおよび実装仕様書に追記していく運用とする。
 
@@ -292,7 +322,7 @@
   2. **付け替え漏れの検証**: マージの最後に4テーブル全てに対し、candidate_product_idへの参照が0件であることをアサーションで直接検証する(`_assert_no_remaining_references()`)。
   3. **ロールバック保証**: `session.begin_nested()`(SAVEPOINT)でマージ全体を包み、アサーション失敗を含むあらゆる例外でその範囲だけを確実にロールバックする。`tests/integration/test_manual_review.py::test_merge_failure_rolls_back_partial_reassignment`で、検証部分だけ失敗させても付け替え済みのrelease_event・soft-delete済みのcandidateまで含めて正しく巻き戻ることを実際に確認済み。
   4. **識別子(type,value)/ウォッチ(user_id)が重複するケース**: matched側に既に同じ組み合わせがあればcandidate側を削除するだけにし、重複を作らない。
-- 入口はCLI(`scripts/manual_review_cli.py list`/`resolve <task_id> confirm|reject --by <name>`)とWeb API(`GET /manual-review-tasks`・`POST /manual-review-tasks/{id}/resolve`、`app/api/routers/manual_review_tasks.py`)の両方を実装した。Discordゲートウェイ接続が未検証(1.1節・タスク16参照)なマージという後戻りしにくい操作を、いきなり未検証の経路で検証するのを避けるため、Discordボタンはこのタスクのスコープに含めていない(CLI/APIで先に検証してから、既存の`interaction_view.py`と同じ「DiscordボタンがFastAPI経由でDBを操作する」アーキテクチャに沿って追加する想定)。
+- 入口はCLI(`scripts/manual_review_cli.py list`/`resolve <task_id> confirm|reject --by <name>`)とWeb API(`GET /manual-review-tasks`・`POST /manual-review-tasks/{id}/resolve`、`app/api/routers/manual_review_tasks.py`)の両方を実装した。Discordゲートウェイ接続が未検証(1.1節・タスク16参照)なマージという後戻りしにくい操作を、いきなり未検証の経路で検証するのを避けるため、Discordボタンはこのタスクのスコープに含めていない(CLI/APIで先に検証してから、既存の`interaction_view.py`と同じ「DiscordボタンがFastAPI経由でDBを操作する」アーキテクチャに沿って追加する想定)。**→ Discordボタン自体は10節で実装・実機検証完了。**
 - CLIで実データ(新規Product 2件→NEEDS_REVIEW発生→confirm解決→マージ確認)を実際に動かして動作確認済み。テストはunit 165件+integration 49件(既存37+新規12: マージ処理7件・API層5件)全pass。
 
 **別タスクとして記録(今回のスコープ外)**: Discord操作(応募済み/ウォッチ/非表示/今回追加したマージ確定API)には権限チェックが一切無い。個人利用の現段階では実害は小さいが、複数ユーザー対応(Phase5)までに必ず対応が必要(CLAUDE.md 3節に記録)。
@@ -333,3 +363,98 @@
 - 「非表示」→ メッセージ書き換え、`opportunities.status='hidden'`
 
 タスク16(Discord Bot Interaction実装)は、ゲートウェイ実接続・ボタン押下→FastAPI→DB反映までの経路を全てエンドツーエンドで実機確認済みとなった。
+
+## 10. manual_review_tasksのDiscordボタン結線・実機検証完了(2026-08-05)
+
+6節でCLI/API側の実装は完了していたマージ確定処理(`resolve_manual_review_task()`)に、Discordボタンからの入口を追加した。「照合を確定する」/「別商品として分離」の2ボタンを既存3ボタン(応募済み/ウォッチ/非表示)とは別枠(row=1)にし、`manual_review_task_id`が渡された場合のみ動的に追加する構成にした(`app/notification/interaction_view.py`)。
+
+**ボタン表示条件の設計判断(ユーザー確認済み)**: `manual_review_tasks`は「仕入れ側(`ingest_normalized_item`)のProduct照合」がNEEDS_REVIEWになった時にだけ作成され、その候補Product IDは`Opportunity.product_id`と一致する。一方`Opportunity.match_status`自体は「相場側(MarketObservation)の独立した照合結果」からセットされるため、仕入れ側と相場側の照合結果が食い違うケースがあり得る(例: 仕入れ側はNEEDS_REVIEWで候補Product+manual_review_taskが作られたが、相場側は別のProductにAUTO_MATCHし、`Opportunity.match_status`はNEEDS_REVIEWにならない/その逆)。表示条件は**「`match_status==NEEDS_REVIEW`かつ該当pendingタスクが実在する」の両方を満たす場合のみ**とした(`app/scheduler/tasks.py:run_live_e2e_verification()`が両方をチェックした上で`manual_review_task_id`を結果に含める)。片方しか満たさないケースはボタンを出さない(取りこぼしうる既知の制約として記録)。
+
+**誤操作防止**: いずれのボタンも直接は実行せず、まずephemeralな確認メッセージ(`_ManualReviewConfirmView`、「実行する」/「キャンセル」の再クリック方式、timeout=60)を挟む。
+
+**実装中に発見したギャップ(CLI/APIも含め未実装だった)**: `resolve_manual_review_task()`はManualReviewTask.statusの更新のみ行い、`Opportunity.match_status`自体は一度も更新していなかった(`MatchStatus.MANUALLY_CONFIRMED`は定義時から「呼び出し側が設定する状態」と明記されていたが、呼び出し側の実装が無かった)。`app/pipeline/manual_review.py`に`_update_opportunity_match_status()`を追加し、confirmではreassign前のcandidate配下Opportunity全件をMANUALLY_CONFIRMEDへ、rejectではDIFFERENT_PRODUCTへ更新するようにした(同一SAVEPOINT内のためロールバックとも整合、`test_merge_failure_rolls_back_partial_reassignment`で確認済み)。これによりCLI/API経由の解決でも今後は`Opportunity.match_status`が正しく更新されるようになった。
+
+**テスト**: unit/integration合わせて既存230件全pass。`tests/integration/test_manual_review.py`にOpportunity.match_status更新の確認(confirm/reject/ロールバック)を追加、`tests/integration/test_interaction_view.py`にボタン表示条件・確認ダイアログ・実行・キャンセル・二重解決時の409ハンドリングのテストを追加(12件)。
+
+**実機検証(常時起動Bot経由、ユーザーが実際にDiscordアプリでボタン押下)**: 3パターンを実データで確認した。
+1. **識別子無しでconfirm**: 「照合を確定する」→確認→「実行する」→ `manual_review_tasks.status=confirmed`、`opportunities.match_status=manually_confirmed`、`opportunities.product_id`がmatched側へ付け替え、candidate Productがsoft-delete。同じタスクへの2回目のクリックは`409`となり、ephemeralに失敗表示されることも確認(二重解決防止)。
+2. **JAN付きでconfirm**: 同上に加え、`product_identifiers(type=jan, value=...)`がcandidateからmatched Product側へ実際に付け替わることを確認(要件「この時点でJAN/型番がproduct_identifiersへ書き込まれることを確認」に対応)。
+3. **reject(別商品として分離)**: 「別商品として分離」→確認→「実行する」→ `manual_review_tasks.status=rejected`、`opportunities.match_status=different_product`、`product_id`は変更されず(マージ処理を一切呼んでいないことを確認)、candidate Productもsoft-deleteされない。
+
+検証用に作成したProduct/Opportunity等(`一番くじ 鬼滅の刃～姉の仇～ B賞/C賞/D賞`、`[検証専用]`/`[検証専用2]`とラベル付けしたSource等)は、7節以前の`verification_synthetic`と同じ運用方針(実データ扱いのまま残す)に倣い、本番DBに残したままにしている。
+
+**別タスクとして記録(今回のスコープ外)**: 6節で記録した「Discord操作には権限チェックが一切無い」は、今回追加した2ボタン(「照合を確定する」/「別商品として分離」)にも同様に当てはまる。マージ確定操作はもともと最も後戻りしにくい操作として記録済みだが、今回の実装でも`verify_api_key`(単一ユーザー前提)以外のユーザー単位の権限チェックは追加していない。複数ユーザー対応(Phase5)までに必ず対応が必要(3節に記録)。
+
+## 11. on-line.1kuji.com商品一覧ページの自動収集追加・本番実機検証完了(2026-08-06、タスク18)
+
+1.1節の通り、on-line.1kuji.comは商品詳細・応募ページのみBot対策で取得不可と判明し、商品一覧ページ(`ProductList.aspx`)を`app/collectors/sources/ichiban_kuji.py`の`target_urls`へホワイトリスト方式で追加した(実装詳細は1.1節参照)。ユーザーの指示により`worker`/`beat`コンテナを再起動して本番へ反映し、手動トリガーで実機検証した。
+
+**デプロイ**: `docker compose restart worker beat`を実行。両コンテナとも正常に再接続(Redisブローカー接続・Celery Beatスケジューラ起動をログで確認)。
+
+**実機検証結果**: `worker`コンテナ内で`run_ichiban_kuji_collector()`を直接呼び出し、6時間を待たず即座に実行した。
+
+1. **新規発見件数**: `success_count=37`(内訳: 1kuji.comトップページ15件 + on-line.1kuji.com商品一覧22件、`error_count=0`、`collector_runs`テーブルにも記録済み)。1kuji.comトップページの15件と商品一覧の22件を商品名で突き合わせたところ、完全一致で重複していたのは5件(「一番くじ 進撃の巨人 ～選択と結果～」「一番くじ ゴジラ 最恐怪獣王列伝」「一番くじ 春秋戦国大戦キングダム The Animation 知と武の両輪」「一番くじ 『ミニオンズ＆モンスターズ』」「一番くじ ぷちきゅあ」)。したがって商品一覧ページ由来の**純粋な新規発見は17件**(1kuji.comのPICK UP ITEM(注目商品のみ抜粋)には出てこない商品を多数カバーできることを確認)。
+2. **アクセス範囲の確認**: 実行結果`error_count=0`(=ホワイトリストガードが一度も発火しなかった、想定外URLへのアクセス試行が無かったことを意味する)に加え、コード上`self.fetch()`の呼び出し箇所は`fetch_bandaispirits_detail()`内(bandaispirits.co.jp向け)の1箇所のみで、`run()`(基底クラス)が`target_urls`(`ICHIBAN_KUJI_TOP_URL`・`ONLINE_1KUJI_PRODUCT_LIST_URL`の2つのみ、いずれもモジュール定数でハードコード)以外のURLでfetchを呼ぶ経路が構造的に存在しないことをコードレビューで確認した。`ProductList.aspx`以外のon-line.1kuji.comパスへのアクセスは発生していない。
+
+**【重要・未実装であることが判明】この収集タスクはDBへ一切反映しない**: `run_ichiban_kuji_collector()`(Celeryタスク)は`collector.run()`(fetch→parse→normalize→validate)の実行結果を`collector_runs`テーブルへログ記録するのみで、`ingest_normalized_item()`を呼んでおらず、`products`/`release_events`への書き込みを一切行わない(タスク12の設計時点からの既存スコープ外判断であり、今回の変更による新たな制約ではない。1kuji.comトップページも従来から同様)。そのため、実行前後で`products`/`release_events`のレコード数に変化は無い(4件のまま、実行前後で確認済み)。新商品を実際にDBへ反映してOpportunity生成まで繋げるには、タスク13相当の「収集結果をDBへ反映するパイプライン」への結線が別途必要(現状は手動でのfetch_bandaispirits_detail()呼び出し等に依存)。
+
+**運用上の含意**: 現時点では「新商品の自動発見」は収集ログ(`collector_runs`・アプリケーションログ)としてのみ可視化され、Discord通知やOpportunity生成には自動的には繋がらない。この収集結果を実際に活用する(例: 新規発見したpidを起点にbandaispirits.co.jp等で価格裏取りする、DBへ反映するパイプラインに繋ぐ)には、別タスクとして設計・実装が必要(CLAUDE.md 3節に記録)。**→ この欠落は12節で解消した。**
+
+## 12. 定期実行タスクのDB反映・Opportunity生成・通知判定への結線(2026-08-06、タスク20)
+
+11節で判明した「収集タスクはDBへ一切反映しない」問題について、駿河屋(`run_suruga_ya_price_rising_scan`)・ポケモンセンターオンラインの状況もユーザー指示で調査した。
+
+**調査結果(着手前に報告済み)**: 一番くじだけの問題ではなく、Beat Scheduleに登録されている2タスク(`run_ichiban_kuji_collector`=6時間毎、`run_suruga_ya_price_rising_scan`=12時間毎)がいずれも同じ構造(`collector_runs`へのログ記録のみ)だった。タスク12設計時点での意図的なスコープ外判断であり、実際にDB反映→通知まで一気通貫するのはタスク19の`run_live_e2e_verification`(手動検証専用、Beat未登録)のみだった。ポケモンセンターオンラインは別の理由(商品一覧ページ未確認)でそもそもBeatに未登録(3節に記載済みの既知の制約、今回新たに判明したものではない)。
+
+**設計方針**: ユーザー指示通り、タスク13・19で実装済みの`ingest_normalized_item()`/`match_observation_to_product()`/`build_and_score_opportunity()`/`evaluate_notification()`はいずれも変更せずそのまま呼び出す形にした。新規ロジックはオーケストレーション(ループ処理)のみ。
+- `run_ichiban_kuji_collector`: `collector.run()`への依存をやめ(内部でNormalizedItemを呼び出し側へ返さない設計のため)、fetch→parse→normalizeを直接ループしてNormalizedItemを取得し、`ingest_normalized_item()`でDBへ反映するようにした。一番くじ側は相場データを持たないため、Opportunity生成・通知判定はここでは行わない。
+- `run_suruga_ya_price_rising_scan`: 観測した買取価格を`match_observation_to_product()`で**既存**Productと照合し、一致すれば紐づく各release_events(価格確定済みのもの全件)について`build_and_score_opportunity()`/`evaluate_notification()`を実行するようにした(新規ヘルパー`_match_and_score_observation()`)。仕入れ側と相場側が独立に収集される以上、両者が自然に出会う結合点は「相場側が既存Productと照合できた時点」であり、一番くじCollector自身が駿河屋を検索しにいく設計にはしなかった(そのような設計は新商品発見直後は相場データが存在せずほぼ空振りになる上、依存関係が逆転し複雑になるため)。
+- Discord送信は引き続きタスクの中では行わない(タスク19と同じ理由、同期Celeryタスクと非同期discord.pyゲートウェイの相性問題)。should_send=Trueの結果は`pending_notifications`(embed含む)としてタスクの返り値に含める。
+- `_pending_manual_review_task_id()`を共通ヘルパーとして抽出し、`run_live_e2e_verification`(既存動作は変更せず、重複コードの置き換えのみ)でも使うようにした。
+
+**実装中に発見・修正したテスト分離バグ**: `tests/unit/test_scheduler.py`は従来「サンドボックスは1kuji.com/suruga-ya.jpへのネットワークアクセスがブロックされている」という環境依存の前提でFetchErrorの発生を検証していたが、実際にはホスト環境から外部アクセスが到達可能な場合があることが判明した。ingest配線追加により、この網羅されていなかった「たまたま到達できる」経路が本番DBへ実データを書き込んでしまう実害を伴うようになったため(実際に発生した。下記参照)、`fetch()`/`search()`をmonkeypatchして常にFetchErrorを発生させる決定的なテストに書き換えた。またこれに伴い、`run_ichiban_kuji_collector`/`run_suruga_ya_price_rising_scan`とも「取得できたアイテムが1件も無い場合はDBセッションを開かない」ガードを追加した(無駄なSource行作成を避ける意図もある)。
+
+**実装中に発生した実害と対処**: 上記バグ修正前に`tests/unit/test_scheduler.py`を実行した際、実際に1kuji.com/on-line.1kuji.comへ到達し、本番DBへ実データ(Source「一番くじ公式」・Product 32件・ReleaseEvent 36件)が書き込まれた。これは意図しない副作用だったが、データ自体は本番が本来持つべき正しい内容(実在の商品情報)だったため削除はせず、タスク20の実データによる動作証跡としてそのまま残している。ただしこれにより`tests/integration/test_e2e_pipeline.py`が独自に使っていた`collector_key="ichiban_kuji"`という値が本番の実Sourceと衝突しUNIQUE制約違反を起こしたため、テスト側の値を`"test_ichiban_kuji_e2e"`に変更した(本番側の値は`run_ichiban_kuji_collector`が実際に使う値のため変更していない)。
+
+**実機検証結果(本番、`worker`/`beat`再起動後)**:
+- `run_ichiban_kuji_collector`を手動トリガーし、Product 32件・ReleaseEvent 36〜40件が実際にDBへ反映されることを確認した(1kuji.comトップページ15件+商品一覧22件、重複分は同一Productへ統合)。
+- `run_suruga_ya_price_rising_scan`を手動トリガーしたところ、既定の巡回キーワード(「一番くじ」「ポケモンカード」、`purchase_hendou=価格上昇中`フィルタ)では新規Opportunityは0件だった。個別に「一番くじ ゴジラ MACHINE CHRONICLE」等6商品名で駿河屋を直接検索したところ、いずれも実際の買取価格観測は取得できたが、駿河屋側の商品タイトルは「孫悟空＆ブルマ＆クリリン 潜水艇「一番くじ ドラゴンボール EX 対決!レッドリボン軍」D賞 フィギュア」のような個別景品名(シリーズ名を含むがそれ以外の文字列が多い)であり、既存のProduct Matcher(`SequenceMatcher`による全体文字列の編集距離ベース類似度)ではシリーズ名一致分のスコアが埋もれてNEEDS_REVIEW閾値(40点)に届かないことを実データで確認した(score=0〜5)。**これは今回の結線作業とは独立した、Product Matcherの一番くじ商品に対する既存の照合精度の限界であり、新たな既知の課題として3節に記録した。**
+- 上記の理由で自然な自動マッチは発生しなかったため、実際の買取価格観測(価格・URL・信頼度は全て実データ)のtitleのみ検証目的でシリーズ名(Product名)と完全一致させ、`_match_and_score_observation()`を直接呼び出して結線そのものの動作を検証した。結果、`opportunities`テーブルへ実際に1件反映(`match_status=needs_review`、score=0.49)、`evaluate_notification()`がshould_send=Trueと判定し、実際にDiscordへEmbed+ボタン付きメッセージを送信できることを確認した(message_id取得済み)。
+- **副産物として発見した既存バグ**: `app/pipeline/notify.py:evaluate_notification()`の`OpportunityView`構築で、「最良売却先」欄が`best_channel_name=source.name`(仕入れ側のSource名)になっており、`build_and_score_opportunity()`に渡した実際の売却チャネル名(`channel_name`引数、例:`"suruga_ya"`)が表示に反映されない。今回のタスクとは無関係な既存コードの問題のため修正はしていない(3節に記録)。
+
+**別タスクとして記録(今回のスコープ外)**:
+- Discord自動送信の仕組みが未実装: `pending_notifications`(embed)を計算するところまでで、これを常時起動Botが自動的に拾って送信する仕組みはまだ無い(常時起動Botは現状`--send-test-notification`起動時に1回送るのみ)。新商品が完全に自動でDiscordへ届くには、常時起動Bot側にこれらのタスクの結果を定期的に取得して送信する仕組みが別途必要。
+- Product Matcherの一番くじ商品(個別景品タイトル)に対する照合精度: 上記の通り、シリーズ名一致だけでは現状スコアが伸びない。改善するなら例えば「観測タイトルがProduct名を部分文字列として含む場合の加点」等の見直しが考えられるが、商品照合の確定ロジックに関わる変更のため、着手前に協議が必要(CLAUDE.md 0.5)。
+- `evaluate_notification()`の「最良売却先」表示バグ。
+
+**テスト**: unit/integration合わせて243件全pass。`tests/unit/test_scheduler.py`をネットワーク・DB非依存の決定的なテストに書き換え、`tests/integration/test_e2e_pipeline.py`のcollector_key衝突を解消した。
+
+## 13. タスク20の事故データの再収集検証・テストDB分離設計の記録・ポケセン新商品一覧ページ発見(段階1)(2026-08-06、タスク21)
+
+12節の事故・既知課題を受けて、ユーザー依頼により以下4点に対応した。
+
+### 13.1 タスク20の事故データ(Product 32件・ReleaseEvent 36件)の再収集時デデュープ検証
+
+`tests/integration/test_incident_recollection_dedup.py`を新規追加し、実際に本番DBへ書き込まれたこの36件のReleaseEvent全件について「もう一度同じページを収集したら」を`db_session`フィクスチャ(ネストしたトランザクション+rollback、conftest.py)の中で再現して検証した(本番の実データに対して安全に検証できる設計、13.2節参照)。
+
+- 全件が`match_or_create_product()`のexact_match経路(商品名の完全一致)でAUTO_MATCHとなり既存のProduct/ReleaseEventへ正しく紐づき、Product/ReleaseEventのいずれも増えないことを確認した(再収集前後で32件/36件のまま)。
+- **同時に判明した限界**: 一番くじ商品は識別子(JAN/型番)を持たず(1.1節)、`Product.release_date`もどこからも書き込まれないため、`calc_match_score()`側の名前類似度による加点は理論上の上限が+40点(`NEEDS_REVIEW_THRESHOLD`と同値)にしかならず、AUTO_MATCH(90点)/HIGH_PROBABILITY_MATCH(70点)には**原理的に届かない**。つまり一番くじ商品の重複防止は事実上`match_or_create_product()`のexact_match(文字列完全一致)経路のみに依存しており、fuzzy matching側はこれを一切補完できない。空白のゆれ自体は`_title_similarity()`が事前に空白を除去するため無害だが、それ以外の表記変動(全角/半角、記号の差、サイト側のtitle文言変更等)でexact_matchが外れた場合、確実にNEEDS_REVIEWへ落ちて重複Productが作られる。この限界を`test_recollecting_with_whitespace_variation_relies_entirely_on_exact_match_path`として現状の実際の挙動を記録する回帰テストの形で残した(「直すべきバグ」としては扱わず、商品照合の確定ロジックに関わる変更のため着手前に協議が必要、CLAUDE.md 0.5・282行目の駿河屋照合精度の課題と同根)。
+
+### 13.2 テスト用DBが本番と分離されていない設計上のギャップ(記録のみ、対応はしていない)
+
+専用のテスト用DBが存在せず、`tests/integration/conftest.py`の`db_session`フィクスチャは本番と全く同じ`app.config.settings.database_url`に接続し、ネストしたトランザクション+rollbackのみで隔離している(接続先そのものは本番DBと同一)。この設計自体はSQLAlchemyの標準的なテスト分離パターンであり、`db_session`を経由する限り安全に機能する(13.1節の検証はこの隔離のもとで安全に行えている)。
+
+**12節の事故の本質はまさにこの前提が崩れたケースだった**: `tests/unit/test_scheduler.py`はCeleryタスク関数を直接呼び出す設計で、`db_session`フィクスチャを一切経由せず、タスク内部が独自にDBセッションを開く(アプリ本体と同じ経路で本番へ直接接続する)。そのためrollback保護の外側で本番へ実際に書き込まれた。**今後も同じ構造のリスクが残っている**: `db_session`を経由しないテスト(Celeryタスクや将来追加されるスクリプト類を直接呼ぶテスト全般)は、書き込みが本番へ確定してしまう経路になりうる。タスク20では該当箇所をnetwork層のmonkeypatchで塞いだ(12節参照)が、これは個別対応であり、同種のテストが今後増えるたびに同じ注意が必要になる。
+
+**将来的な検討課題**: `docker-compose.yml`にテスト専用DBサービス(例: `test-db`、本番`db`とは別のPostgreSQLコンテナ+別ボリューム)を追加し、テスト実行時は`DATABASE_URL`をそちらに向ける構成にすれば、rollbackに頼らずコンテナレベルで本番データと完全に分離できる。現時点では未着手(この記録のみ)。
+
+### 13.3 ポケモンセンターオンライン新商品一覧ページの発見・段階1実装
+
+3節の「商品一覧ページ未確認」が長らく未調査のまま残っていたため、実際にトップページのナビゲーションから調査した。詳細な検証結果・設計判断は`app/collectors/sources/pokemon_center_online.py`のモジュールdocstring「新商品一覧ページの発見・段階1対応(2026-08-06)」に記載済み。要点のみここに記録する。
+
+- 新商品一覧ページ`https://www.pokemoncenter-online.com/search/?prefn1=releaseType&prefv1=1&srule=top-new-product`を発見。Bot対策なし、Salesforce Commerce Cloud構成。
+- **ページング調査結果(ユーザーからの確認依頼への回答)**: 初期表示は1ページ40件・全8ページの「もっと見る」型(`<div class="grid-footer" data-page-size="40.0">`+`<select name="page">`)。ただし実際にcrawler観点で使う場合、`start`パラメータは常に0として扱われ、`sz`パラメータのみが「累積で何件返すか」を制御する(`sz=500`→275件でそれ以上増えない=2026-08-06時点の全新商品件数)ことを確認した。**41件で全件ではなく、275件が実際の全件だった。** 複数ページを順に辿る必要はなく、`sz`を十分大きくした1回のリクエストで全件を取得できるため、`NEW_PRODUCT_LIST_URL`定数に`start=0&sz=500`を固定で付与した1本のURLとして実装した(ユーザー確認前の自己判断、CLAUDE.md 0.5の「タスクの粒度」相当の解釈統一として記録)。`sz=500`は現在件数に余裕を持たせた固定値であり、将来275件を超えた場合は取りこぼしうる(致命的ではないが要継続監視)。
+- **段階1のスコープ(ユーザー指示通り、ここで止めた)**: `target_urls`への追加(ホワイトリスト方式、`fetch()`が`/search/`配下はこの1URLの完全一致のみ許可)、一覧ページからの商品コード抽出(`extract_new_product_codes()`)、各コードに対する個別ページの取得・パース・正規化(`discover_new_products()`が既存の`fetch_product()`を再利用)までを実装した。**Beat Scheduleへの登録・DB反映(`ingest_normalized_item()`等への結線)は行っていない。**
+- **基底クラスとの整合性についての設計判断**: `SourceCollector.run()`は「1URL=1回のfetchでParsedItemが得られる」単層設計だが、ポケセンの新商品一覧ページには「各種期間」(締切・当選発表・購入期限、このCollectorの存在意義そのもの)が無く、商品ごとに個別ページへの追加fetchが必要(2段階)。そのため`parse()`はこのURLに対して意図的に空リストを返し(誤ってrun()経由で不完全なParsedItemが生成されるのを防ぐ)、実際の発見・取得は新設した`discover_new_products()`で行う設計にした。タスク20で`run_ichiban_kuji_collector`が`collector.run()`に頼らず専用ループを組んだ(12節)のと同じ考え方であり、段階2でBeat Schedule結線する際も同様の専用ループを想定している。
+- **実データでの検証**: 実際に取得した生HTML(`tests/fixtures/raw_html/raw_pokemon_center_new_product_list.html`、275件)・個別ページ1件(`raw_pokemon_center_new_product_list_sample_detail.html`、一覧発見分のコード`4521329413075`)をFixtureとして追加し、既存の`parse()`にコード変更無しで実データが正しく通ることを確認した上でテストを書いた。新規テスト5件追加(unit 29件中)、`fetch()`のホワイトリストガード・`extract_new_product_codes()`の275件抽出・`discover_new_products()`のオーケストレーション(モックしたfetch()で実通信無しに検証)を含む。全体テストは250件(unit+integration)全pass。
+- **段階2として別途依頼予定(このタスクでは対応しない)**: Beat Scheduleへの登録、`ingest_normalized_item()`等へのDB反映結線。275件を毎回individual fetchするのは実行コストが高いため、段階2では「DB未登録の新規コードのみfetchする」等の差分化の検討も必要(モジュールdocstring参照、現時点では未対応)。

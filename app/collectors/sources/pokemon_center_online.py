@@ -26,11 +26,32 @@ CLAUDE.md 1.4、Fixture(pokemon_center_online_product_20260803.md)の実測結�
   別の文脈で"予約"の語が再度出現するが、最初の一致を採用することで正しく
   区別できることを確認済み)。
 
-【商品一覧ページ未確認による制約】
-CLAUDE.md 1.4/3節のとおり、商品一覧ページ(カテゴリ別・新着別)のURL・構造が未確認のため、
-このCollectorはtarget_urls(run()による自動巡回対象)を持たない。商品コードが判明している
-個別ページをfetch_product()で都度取得する運用とし、一覧巡回による自動発見は別タスク
-(PoC-6相当)とする(要検証)。
+【新商品一覧ページの発見・段階1対応(2026-08-06)】
+CLAUDE.md 3節・12節のとおり、on-line.1kuji.com商品一覧ページ(タスク18)と同様の
+「新商品自動発見」がポケセンには無い状態が長らく未確認のまま残っていた。トップページの
+ナビゲーションから新商品一覧`https://www.pokemoncenter-online.com/search/?prefn1=releaseType&prefv1=1&srule=top-new-product`
+(Salesforce Commerce Cloud構成、Bot対策なし)を発見し、実際に取得・検証した。
+
+- **ページング**: `<div class="grid-footer" data-page-size="40.0" data-page-number="1.0">`と
+  `<select name="page">`(1〜8のoption)から、初期表示は1ページ40件・全8ページの
+  「もっと見る」型(無限スクロール相当)であることを確認した。URLの`start`/`sz`
+  クエリパラメータで挙動を検証したところ、`start`はどの値を渡しても常に0として
+  扱われ、`sz`のみが「累積で何件返すか」を制御する(`sz=40`→41件、`sz=80`→81件、
+  `sz=500`→275件でそれ以上増えない=これが実際の全新商品件数)ことを確認した。
+  つまり複数ページを順に辿る必要はなく、`sz`を十分大きくした1回のリクエストで
+  全件を取得できる。
+- **この1URLのみ例外的にホワイトリスト方式で自動収集対象に追加した**(段階1、下記参照)。
+  `NEW_PRODUCT_LIST_URL`は上記の検索条件に`start=0&sz=500`を固定で付与した1本の
+  定数URLとし、`fetch()`は`/search/`パスについてこの完全一致のみを許可する
+  (on-line.1kuji.comと同じホワイトリスト方式、実装仕様書9章/CLAUDE.md 1.1参照)。
+  `sz=500`は2026-08-06時点の実件数(275件)に余裕を持たせた固定値であり、将来
+  新商品総数がこれを超えた場合は取りこぼしうる(要継続監視、致命的ではない)。
+- **段階1のスコープ**: 一覧ページから商品コードを抽出し、`fetch_product()`
+  (既存、個別ページのfetch→parse→normalize)を各コードに対して呼び出すところまで。
+  Beat Scheduleへの登録・DB反映(ingest_normalized_item()等への結線)は段階2として
+  別途対応する(タスク18→20と同じ2段階の進め方)。275件全件を毎回individual fetch
+  するのは実行コストが高いため、段階2で「DB未登録の新規コードのみfetchする」等の
+  差分化を検討する必要がある(現時点では未対応、このコメントのみ)。
 
 【通常販売ページの構造未確認】
 Fixtureは抽選販売商品の1件のみ。Fixture注記2のとおり、通常販売・予約販売ページで
@@ -43,11 +64,29 @@ Fixture注記1のサンプル正規表現は「時:分」のコロン区切り�
 Fixture本文中の実際の日時表記は「16時00分」のような漢字区切りであり、コロンは
 一度も出現しない(サンプル正規表現と本文実測値が食い違っていた)。本モジュールの
 PERIOD_RANGE_PATTERN/SINGLE_DATETIME_PATTERNは本文の実測表記(漢字区切り)を採用している。
+
+【商品コード(13桁)とJANコードの関係(2026-08-05、サンプル5件による確認)】
+CLAUDE.md 3節の「商品コードがJANコードと一致するかの確認」に対応する。通常販売商品
+3件("4521329432069"/"4521329413051"/"4521329338453")は全て"45"始まり、抽選販売商品
+2件("9900000006082"/"9900000006808")は全て"99"始まりだった。JAN-13の国コード部の
+うち"45"/"49"はGS1 Japanが管理する日本の正規事業者コード範囲であり、"20"〜"29"・"99"は
+GS1が店舗外で流通しない「インストアマーキング」用の疑似コードとして予約している範囲
+にあたる(参考: GS1 Japan公表のJAN企業コード割当表)。この対応関係に基づき、
+`_classify_product_code()`で先頭2桁が"45"/"49"の場合のみ`identifiers["jan"]`として
+供給し、それ以外("99"始まり等)は`extra["product_code_type"] = "internal_code"`として
+値自体は保持しつつ、JAN一致スコアリング(technical分析レポート11.2、JAN一致+100)の
+対象からは外すようにした。
+**信頼度についての注意**: 上記の判定はサンプル5件から観測した経験則であり、GS1の
+公式文書そのもので裏取りしたものではない。高確率ではあるが100%の保証ではないため、
+今後別の先頭2桁パターン(例: 通常販売なのに"45"/"49"以外)が実データで見つかった場合は
+本判定ロジックの見直しが必要になる(要継続検証)。
 """
 
+import asyncio
 import re
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
+from urllib.parse import urljoin
 
 import httpx
 from selectolax.parser import HTMLParser
@@ -65,6 +104,35 @@ from app.domain.enums import FulfillmentType, RegionSource, SupportedEventType
 
 PRODUCT_URL_TEMPLATE = "https://www.pokemoncenter-online.com/{code}.html"
 PRODUCT_URL_PATTERN = re.compile(r"https://www\.pokemoncenter-online\.com/(?P<code>\d{13})\.html")
+
+# モジュールdocstring「新商品一覧ページの発見・段階1対応(2026-08-06)」参照。
+# start=0&sz=500を固定で付与し、1リクエストで新商品全件(検証時点275件)を取得する。
+NEW_PRODUCT_LIST_URL = (
+    "https://www.pokemoncenter-online.com/search/"
+    "?prefn1=releaseType&prefv1=1&srule=top-new-product&start=0&sz=500"
+)
+# 一覧ページ内の個別商品リンク(相対パス「/{13桁コード}.html」)。
+LISTING_PRODUCT_LINK_PATTERN = re.compile(r"^/(?P<code>\d{13})\.html")
+
+# モジュールdocstring「商品コード(13桁)とJANコードの関係」参照。GS1 Japanが管理する
+# 日本の正規事業者コード範囲("45"/"49")の先頭2桁のみJANコードとして扱う。
+# サンプル5件からの経験則であり、GS1公式文書での裏取りではないため高確率だが
+# 100%の保証ではない(要継続検証)。
+JAN_ELIGIBLE_PREFIXES = ("45", "49")
+
+
+def _classify_product_code(product_code: str | None) -> str | None:
+    """商品コードがJANコードとして扱えるかを先頭2桁で判定する。
+
+    "45"/"49"始まり(GS1 Japan管理の正規事業者コード範囲)は"jan"、
+    それ以外("99"始まり等、GS1がインストアマーキング用に予約している疑似コード範囲)は
+    "internal_code"を返す。後者はJAN一致スコアリング(technical分析レポート11.2)の
+    対象にしない(=identifiersへは供給しない)ための印であり、値自体はextraに
+    保持したままにする(モジュールdocstring参照。サンプル5件からの経験則、要継続検証)。
+    """
+    if product_code is None:
+        return None
+    return "jan" if product_code[:2] in JAN_ELIGIBLE_PREFIXES else "internal_code"
 
 # Fixture注記: 「5,800円 税込」のような表記。実データでは金額と「円」「税込」が
 # 別要素に分かれ、フラット化すると間に改行が入るため、\sで改行も許容する
@@ -122,17 +190,44 @@ def _datetime_from_match(match: re.Match, prefix: str = "") -> datetime:
 class PokemonCenterOnlineCollector(SourceCollector):
     """ポケモンセンターオンライン商品詳細ページCollector。
 
-    一覧ページが未確認のため(モジュールdocstring参照)、target_urlsによる自動巡回は
-    行わず、fetch_product()で商品コードを指定して個別に取得する運用とする。
+    商品コードが判明している個別ページはfetch_product()で都度取得する
+    (従来からの運用)。加えて、新商品一覧ページ(NEW_PRODUCT_LIST_URL、モジュール
+    docstring「新商品一覧ページの発見・段階1対応」参照)から商品コードを自動発見する
+    discover_new_products()を段階1として追加した。
+
+    【target_urls/parse()とdiscover_new_products()の役割分担(重要)】
+    基底クラスSourceCollector.run()は「1URL=1回のfetch→そのraw HTMLをparse()に
+    渡せばParsedItemが得られる」という単層の設計(1kuji.com/on-line.1kuji.com/
+    suruga-ya.jpはこれで成立する)だが、ポケセンの新商品一覧ページには「各種期間」
+    (締切・当選発表・購入期限、このCollectorの存在意義そのもの)が含まれておらず、
+    一覧の各商品ごとに個別ページへの追加fetchが必要になる(2段階)。そのため
+    target_urlsにはNEW_PRODUCT_LIST_URLを含める(fetch()のホワイトリスト判定・
+    「この一覧ページも扱う」という宣言のため)が、parse()はこのURLに対しては
+    意図的に空リストを返す(run()を誤って使うと「各種期間」を含まない不完全な
+    ParsedItemが生成されてしまうのを避けるため)。一覧ページからの実際の商品発見は
+    discover_new_products()を呼ぶこと。タスク20(app/scheduler/tasks.py)が
+    collector.run()に頼らず独自ループでingest_normalized_item()へ結線したのと
+    同じ考え方(段階2でBeat Schedule結線する際も同様の専用ループを想定)。
     """
 
     source_name = "pokemon_center_online"
     supported_event_types = [SupportedEventType.LOTTERY, SupportedEventType.NORMAL_SALE]
-    target_urls: list[str] = []
+    target_urls: list[str] = [NEW_PRODUCT_LIST_URL]
     # 要検証: 巡回頻度を裏付ける実データ根拠がないため、一番くじCollectorと同程度の暫定値とする。
     default_interval_seconds = 3 * 60 * 60
 
     async def fetch(self, target_url: str) -> RawFetchResult:
+        # ホワイトリスト形式: /search/配下はNEW_PRODUCT_LIST_URLの完全一致のみ許可する
+        # (on-line.1kuji.comと同じ方針、app/collectors/sources/ichiban_kuji.py参照)。
+        # 個別商品ページ(/{13桁コード}.html)はfetch_product()が組み立てる既存の
+        # 許可対象のため、この判定の対象外(従来通り無制限)。
+        parsed_path = target_url.split("pokemoncenter-online.com", 1)[-1]
+        if parsed_path.startswith("/search/") and target_url != NEW_PRODUCT_LIST_URL:
+            raise FetchError(
+                "pokemoncenter-online.comの/search/配下への自動アクセスは方針により禁止されています"
+                f"(許可されているのは{NEW_PRODUCT_LIST_URL}のみ)"
+            )
+
         try:
             # follow_redirects=True: app/collectors/markets/suruga_ya.pyと同じ理由
             # (2026-08-05、Collector稼働状況CLI導入時にsuruga-ya.jpの301で発覚)。
@@ -156,7 +251,60 @@ class PokemonCenterOnlineCollector(SourceCollector):
         if not raw.html:
             raise ParseError(f"{raw.url}: html本文が空です")
 
+        if raw.url == NEW_PRODUCT_LIST_URL:
+            # クラスdocstring参照: 一覧ページには「各種期間」が無く、単層のrun()経由では
+            # 不完全なParsedItemしか作れないため、意図的に空を返す
+            # (discover_new_products()を使うこと)。
+            return []
+
         return [self._parse_product_detail(raw)]
+
+    def extract_new_product_codes(self, raw: RawFetchResult) -> list[str]:
+        """新商品一覧ページ(NEW_PRODUCT_LIST_URL)のraw HTMLから、個別商品ページへの
+        リンク(相対パス「/{13桁コード}.html」)を商品コードとして抽出する
+        (出現順、重複除去済み)。"""
+        if not raw.html:
+            raise ParseError(f"{raw.url}: html本文が空です")
+
+        tree = HTMLParser(raw.html)
+        codes: list[str] = []
+        seen: set[str] = set()
+        for anchor in tree.css("a"):
+            href = anchor.attributes.get("href") or ""
+            absolute = urljoin(raw.url, href)
+            match = PRODUCT_URL_PATTERN.match(absolute) or LISTING_PRODUCT_LINK_PATTERN.match(href)
+            if match is None:
+                continue
+            code = match["code"]
+            if code in seen:
+                continue
+            seen.add(code)
+            codes.append(code)
+
+        if not codes:
+            raise ParseError(f"{raw.url}: 商品コードを1件も抽出できませんでした(構造変更の可能性)")
+        return codes
+
+    async def discover_new_products(self) -> list[NormalizedItem]:
+        """新商品一覧ページから商品コードを収集し、各商品の個別ページを
+        fetch_product()(既存の実装、fetch→parse→normalize)で取得・正規化する
+        (段階1のスコープ、クラスdocstring参照)。
+
+        Beat Scheduleへの登録・DB反映(ingest_normalized_item()等への結線)は
+        段階2として別途対応する。275件(2026-08-06時点)全件を毎回individual fetch
+        するのはレート制限(rate_limit())込みで実行時間が長くなるため、段階2では
+        「DB未登録の新規コードのみfetchする」等の差分化を検討する必要がある
+        (現時点では未対応)。
+        """
+        listing_raw = await self.fetch(NEW_PRODUCT_LIST_URL)
+        codes = self.extract_new_product_codes(listing_raw)
+
+        items: list[NormalizedItem] = []
+        for index, code in enumerate(codes):
+            if index > 0:
+                await asyncio.sleep(self.rate_limit())
+            items.append(await self.fetch_product(code))
+        return items
 
     def _parse_product_detail(self, raw: RawFetchResult) -> ParsedItem:
         tree = HTMLParser(raw.html)
@@ -235,6 +383,9 @@ class PokemonCenterOnlineCollector(SourceCollector):
 
         extra: dict = {
             "product_code": product_code,
+            # "jan"(GS1正規コード範囲)/"internal_code"(インストア専用疑似コード範囲)/
+            # None(商品コード自体が取れなかった)。モジュールdocstring参照。
+            "product_code_type": _classify_product_code(product_code),
             "inventory_status": inventory_status,
             "purchase_limit_count": purchase_limit_count,
             "application_start_at": application_start_at,
@@ -266,10 +417,18 @@ class PokemonCenterOnlineCollector(SourceCollector):
             # それ以外(各種期間セクションが無い=通常販売と推定)はichiban_kujiと同程度のB。
             confidence_hint = "A" if item.event_type == SupportedEventType.LOTTERY else "B"
 
+            # モジュールdocstring「商品コード(13桁)とJANコードの関係」参照。
+            # "45"/"49"始まりのみJANコードとして供給し、"internal_code"判定のものは
+            # JAN一致スコアリングの対象外にする(identifiersへ含めない)。
+            identifiers: dict[str, str] = {}
+            product_code = item.extra.get("product_code")
+            if item.extra.get("product_code_type") == "jan" and product_code:
+                identifiers["jan"] = product_code
+
             normalized.append(
                 NormalizedItem(
                     product_name=item.raw_title,
-                    identifiers={},  # Fixture注記4: 商品コードがJANコードかは未確認のため設定しない
+                    identifiers=identifiers,
                     category_hint="ポケモンカードゲーム",
                     brand_hint="ポケモン",
                     parsed=item,
@@ -286,8 +445,9 @@ class PokemonCenterOnlineCollector(SourceCollector):
     async def fetch_product(self, product_code: str) -> NormalizedItem:
         """商品コードを指定して個別ページを取得・パース・正規化する。
 
-        一覧ページが未確認のため(モジュールdocstring参照)、run()による自動巡回とは
-        独立して、商品コードが判明した際に個別に呼び出す想定。
+        商品コードが外部で判明している場合の個別呼び出しに加え、
+        discover_new_products()(クラスdocstring参照)からも一覧ページ発見分の
+        各コードに対して呼ばれる。
         """
         url = PRODUCT_URL_TEMPLATE.format(code=product_code)
         raw = await self.fetch(url)

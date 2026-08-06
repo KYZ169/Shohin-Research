@@ -1,19 +1,50 @@
 """Celery Beat結線(app/scheduler/)のテスト。
 
 タスク関数はここではCeleryのbroker経由ではなく直接呼び出す(taskオブジェクトは
-通常の関数として呼び出すとbrokerを介さずその場で実行される)。ネットワーク到達性が
-無いサンドボックス環境でも、Collector.run()/search()が例外を外へ漏らさず
-FetchErrorとして正しく捕捉されることを確認できる(タスク3で実装したrun()の
-エラーハンドリングと同じ理由)。
+通常の関数として呼び出すとbrokerを介さずその場で実行される)。
 
 実際にCeleryワーカー/ブローカー経由でのディスパッチそのものは、ローカルRedisを
 brokerとして使い手動で検証済み(実装報告に記載)。
+
+【2026-08-06(タスク20)追記】従来は「このサンドボックスは1kuji.com/suruga-ya.jpへの
+アクセスがネットワークポリシーでブロックされている」という環境依存の前提に頼って
+FetchErrorの発生を検証していたが、実際にはホスト環境からの外部アクセスが到達可能な
+場合があることが判明した(タスク20実装時、単体テストのつもりで実行したところ実際に
+1kuji.com/on-line.1kuji.comへ到達し、本番DBへ実データが投入される事態が発生)。
+タスク20でrun_ichiban_kuji_collector/run_suruga_ya_price_rising_scanの両方が
+ingest_normalized_item()等でDBへ書き込むようになったため、ネットワーク到達性という
+不確実な前提に依存したテストは「たまたま到達できてしまうと本番DBを汚染する」という
+実害を伴うようになった。そのため、fetch()/search()自体をmonkeypatchして常に
+FetchErrorを発生させる決定的なテストに書き換えた(ネットワーク・DBのいずれにも
+依存しない、真の意味での単体テストに戻す)。
 """
 
 from unittest.mock import patch
 
+import pytest
+
+from app.collectors.base import FetchError
+from app.collectors.markets.suruga_ya import SurugaYaCollector
+from app.collectors.sources.ichiban_kuji import IchibanKujiCollector
 from app.scheduler.celery_app import celery_app
-from app.scheduler.tasks import run_ichiban_kuji_collector, run_suruga_ya_price_rising_scan
+from app.scheduler.tasks import SURUGA_YA_SCAN_KEYWORDS, run_ichiban_kuji_collector, run_suruga_ya_price_rising_scan
+
+
+async def _raise_fetch_error(self, target_url: str):
+    raise FetchError(f"{target_url}: blocked (test double, network access intentionally not exercised)")
+
+
+async def _raise_search_error(self, query: str, identifiers: dict, restrict: list[str] | None = None):
+    raise FetchError(f"{query}: blocked (test double, network access intentionally not exercised)")
+
+
+@pytest.fixture(autouse=True)
+def _block_real_network_access(monkeypatch):
+    """このファイルの全テストで、実際の1kuji.com/on-line.1kuji.com/suruga-ya.jpへの
+    アクセスを確実に発生させない(モジュールdocstring参照)。DB書き込みを伴う
+    成功パスのテストはtests/integration側の責務とする。"""
+    monkeypatch.setattr(IchibanKujiCollector, "fetch", _raise_fetch_error)
+    monkeypatch.setattr(SurugaYaCollector, "search", _raise_search_error)
 
 
 def test_beat_schedule_includes_ichiban_kuji_every_6_hours():
@@ -38,33 +69,30 @@ def test_tasks_are_registered_under_expected_names():
 
 
 def test_ichiban_kuji_task_handles_network_failure_gracefully():
-    """このサンドボックスは1kuji.comへのアクセスがネットワークポリシーでブロックされて
-    いるため、FetchErrorが発生する。タスクが例外を漏らさずhealth=failingの結果を
-    返せることを確認する(タスク3のrun()実装のエラーハンドリングが正しく機能する)。
+    """fetch()が両方のtarget_urlsでFetchErrorを送出するケース。タスクが例外を漏らさず
+    health=failingの結果を返せることを確認する。
 
-    record_collector_run()はDB接続を必要とするため(運用整備タスク、Collector稼働
-    状況CLI用にcollector_runsへ記録する処理)、この純粋な単体テストではpatchして
-    DB接続無しで完結させる。実際にDBへ書き込まれることの確認は
-    tests/integration側の責務とする。
+    2026-08-06(タスク20): 取得できたアイテムが1件も無い場合はDBセッションを開かない
+    実装(app/scheduler/tasks.py参照)のため、record_collector_run()以外はDB接続を
+    一切必要としない(mockしなくても実DBへ触れない)。
     """
     with patch("app.scheduler.tasks.record_collector_run"):
         result = run_ichiban_kuji_collector()
 
     assert result["source_name"] == "ichiban_kuji"
-    assert result["health"] in {"failing", "ok"}  # 万一将来ネットワーク到達可能でも壊れない
-    assert result["success_count"] >= 0
+    assert result["health"] == "failing"
+    assert result["success_count"] == 0
+    assert result["error_count"] == 2  # target_urls 2件とも失敗
+    assert result["ingested_count"] == 0
 
 
 def test_suruga_ya_task_handles_network_failure_gracefully():
-    from app.scheduler.tasks import SURUGA_YA_SCAN_KEYWORDS
-
     with patch("app.scheduler.tasks.record_collector_run"):
         result = run_suruga_ya_price_rising_scan()
 
-    assert isinstance(result["keyword_results"], dict)
-    # ネットワーク到達不可のため全キーワードが失敗し、成功件数0でerror_countが
-    # 巡回キーワード数と一致するはず(将来到達可能になれば自然にkeyword_resultsが埋まる)。
-    assert result["error_count"] + len(result["keyword_results"]) == len(SURUGA_YA_SCAN_KEYWORDS)
+    assert result["keyword_results"] == {}
+    assert result["error_count"] == len(SURUGA_YA_SCAN_KEYWORDS)
+    assert result["pending_notifications"] == []
 
 
 def test_ichiban_kuji_task_records_collector_run_with_correct_task_name():

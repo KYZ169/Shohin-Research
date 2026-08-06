@@ -27,6 +27,16 @@ release_events/opportunities/product_identifiers/watchlistsの4テーブルか�
 - 全体をsession.begin_nested()(SAVEPOINT)で包み、途中で例外(アサーション失敗含む)が
   発生した場合はそのブロックだけを確実にロールバックする。外側のセッション/
   トランザクションの状態に依存しない、自己完結した保証にするため。
+
+【Opportunity.match_statusの更新について(2026-08-05、Discordボタン結線時に追加)】
+MatchStatus.MANUALLY_CONFIRMED/DIFFERENT_PRODUCTは元々「要確認キューを人間が確定させた
+結果として呼び出し側が設定する状態」と設計されていた(app/domain/enums.py:MatchStatus参照)が、
+このモジュールの初版(6節)ではManualReviewTask.statusの更新のみを行い、
+candidate_product_idを参照するOpportunity.match_status自体は更新していなかった
+(CLI/API経由でもこのギャップは存在していた)。Discordボタン("照合を確定する"/
+"別商品として分離")の結線にあたり、この抜けを埋める形で追加した:
+confirmではcandidate_product配下のOpportunity全件(reassign前)をMANUALLY_CONFIRMEDへ、
+rejectではDIFFERENT_PRODUCTへ更新する。
 """
 
 from datetime import datetime
@@ -36,7 +46,7 @@ from sqlalchemy.orm import Session
 
 from app.core.time import JST
 from app.db.models import ManualReviewTask, Opportunity, Product, ProductIdentifier, ReleaseEvent, Watchlist
-from app.domain.enums import ManualReviewTaskStatus
+from app.domain.enums import ManualReviewTaskStatus, MatchStatus
 
 __all__ = ["resolve_manual_review_task", "ManualReviewTaskNotPendingError"]
 
@@ -85,8 +95,15 @@ def resolve_manual_review_task(
 
     with session.begin_nested():
         if resolution == "confirm":
+            # reassign(_merge_candidate_into_matched)でproduct_idが付け替わる前に、
+            # candidate_product配下のOpportunity全件をMANUALLY_CONFIRMEDにしておく
+            # (モジュールdocstring「Opportunity.match_statusの更新について」参照)。
+            _update_opportunity_match_status(session, task.candidate_product_id, MatchStatus.MANUALLY_CONFIRMED)
             _merge_candidate_into_matched(session, task)
-        elif resolution != "reject":
+        elif resolution == "reject":
+            # candidate_productはそのまま分離維持なので、product_idの付け替えは無い。
+            _update_opportunity_match_status(session, task.candidate_product_id, MatchStatus.DIFFERENT_PRODUCT)
+        else:
             raise ValueError(f"resolutionは'confirm'または'reject'である必要があります: {resolution!r}")
 
         task.status = (
@@ -97,6 +114,16 @@ def resolve_manual_review_task(
         session.flush()
 
     return task
+
+
+def _update_opportunity_match_status(session: Session, product_id, match_status: MatchStatus) -> None:
+    """product_idを参照するOpportunity全件のmatch_statusを更新する。
+    モジュールdocstring「Opportunity.match_statusの更新について」参照。
+    """
+    session.query(Opportunity).filter(Opportunity.product_id == product_id).update(
+        {"match_status": match_status}, synchronize_session=False
+    )
+    session.flush()
 
 
 def _merge_candidate_into_matched(session: Session, task: ManualReviewTask) -> None:

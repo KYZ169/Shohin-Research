@@ -107,7 +107,7 @@ def test_collect_to_notification_pipeline_end_to_end(db_session, redis_client):
     source = Source(
         name="一番くじ公式(bandaispirits.co.jp)",
         base_url="https://www.bandaispirits.co.jp",
-        collector_key="ichiban_kuji",
+        collector_key="test_ichiban_kuji_e2e",
     )
     db_session.add(source)
     db_session.flush()
@@ -229,7 +229,7 @@ def test_ingest_normalized_item_is_idempotent_on_repeated_collection(db_session)
     source = Source(
         name="一番くじ公式(bandaispirits.co.jp)",
         base_url="https://www.bandaispirits.co.jp",
-        collector_key="ichiban_kuji",
+        collector_key="test_ichiban_kuji_e2e",
     )
     db_session.add(source)
     db_session.flush()

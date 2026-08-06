@@ -83,8 +83,17 @@ async def _send_test_notification() -> None:
     channel_id = int(settings.discord_notify_channel_id)
     event_id = result["ingest"]["release_event_id"]
     opportunity_id = result["opportunity"]["opportunity_id"]
+    # 2026-08-05(manual_review_tasks結線): run_live_e2e_verification()側で
+    # match_status==NEEDS_REVIEWかつpendingタスク実在の両方を確認済みの場合のみ
+    # manual_review_task_idが入っている(app/scheduler/tasks.py参照)。
+    manual_review_task_id = result["opportunity"].get("manual_review_task_id")
     # timeout=None: 常駐Botはこの後もずっと動き続けるため、Viewを自動失効させない。
-    view = OpportunityActionView(event_id=event_id, opportunity_id=opportunity_id, timeout=None)
+    view = OpportunityActionView(
+        event_id=event_id,
+        opportunity_id=opportunity_id,
+        timeout=None,
+        manual_review_task_id=manual_review_task_id,
+    )
 
     service = NotificationService(client)
     message = await service.send_opportunity_notification(channel_id, result["embed"], view=view)

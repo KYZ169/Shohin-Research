@@ -135,6 +135,7 @@ async def _send_to_discord(
     event_id: str,
     opportunity_id: str,
     interaction_wait_seconds: int,
+    manual_review_task_id: str | None = None,
 ) -> dict:
     """Embedを送信し、OpportunityActionView(応募済み/ウォッチ/非表示ボタン、
     app/notification/interaction_view.py)を添付する。interaction_wait_seconds>0の
@@ -201,6 +202,7 @@ async def _send_to_discord(
                     # (app/notification/interaction_view.pyモジュールdocstring参照)。
                     api_base_url="http://localhost:8001",
                     timeout=interaction_wait_seconds or None,
+                    manual_review_task_id=manual_review_task_id,
                 )
                 message = await service.send_opportunity_notification(channel_id, embed_dict, view=view)
                 send_result["ok"] = True
@@ -326,8 +328,11 @@ def main() -> int:
     channel_id = int(settings.discord_notify_channel_id)
     event_id = result["ingest"]["release_event_id"]
     opportunity_id = result["opportunity"]["opportunity_id"]
+    manual_review_task_id = result["opportunity"].get("manual_review_task_id")
     send_result = asyncio.run(
-        _send_to_discord(result["embed"], channel_id, event_id, opportunity_id, args.interaction_wait_seconds)
+        _send_to_discord(
+            result["embed"], channel_id, event_id, opportunity_id, args.interaction_wait_seconds, manual_review_task_id
+        )
     )
 
     if send_result.get("ok"):

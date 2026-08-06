@@ -80,6 +80,15 @@ def test_confirm_merges_release_events_and_soft_deletes_candidate(db_session):
     db_session.add(task)
     db_session.flush()
 
+    # candidateに紐づくOpportunityも1件作り、confirm後にMANUALLY_CONFIRMEDへ
+    # 更新されること(2026-08-05、Discordボタン結線時に追加)を確認する。
+    opportunity = Opportunity(
+        product_id=candidate.id, event_id=event1.id, best_channel_name="suruga_ya",
+        confidence="B", score="0.5", match_status=MatchStatus.NEEDS_REVIEW,
+    )
+    db_session.add(opportunity)
+    db_session.flush()
+
     resolve_manual_review_task(db_session, task, resolution="confirm", resolved_by="tester")
 
     db_session.refresh(event1)
@@ -94,6 +103,10 @@ def test_confirm_merges_release_events_and_soft_deletes_candidate(db_session):
     assert task.status == ManualReviewTaskStatus.CONFIRMED
     assert task.resolved_by == "tester"
     assert task.resolved_at is not None
+
+    db_session.refresh(opportunity)
+    assert opportunity.match_status == MatchStatus.MANUALLY_CONFIRMED
+    assert opportunity.product_id == matched.id  # Opportunity自体もReassignTablesで付け替え済み
 
     # 4テーブルいずれにもcandidateへの参照が残っていないこと。
     for model in (ReleaseEvent, Opportunity, ProductIdentifier, Watchlist):
@@ -170,6 +183,25 @@ def test_reject_does_not_touch_products(db_session):
     db_session.add_all([matched, candidate])
     db_session.flush()
 
+    source = Source(name="テスト情報源4", base_url="https://example.com", collector_key="test_manual_review4")
+    shop = Shop(name="店舗4", type=ShopType.ONLINE, granularity=ShopGranularity.NATIONAL_CHAIN)
+    db_session.add_all([source, shop])
+    db_session.flush()
+    event = ReleaseEvent(
+        product_id=candidate.id, shop_id=shop.id, source_id=source.id,
+        event_type=SupportedEventType.LOTTERY, product_url="https://example.com/reject",
+    )
+    db_session.add(event)
+    db_session.flush()
+    # candidateに紐づくOpportunityがreject後にDIFFERENT_PRODUCTへ更新されること
+    # (2026-08-05、Discordボタン結線時に追加)を確認する。
+    opportunity = Opportunity(
+        product_id=candidate.id, event_id=event.id, best_channel_name="suruga_ya",
+        confidence="B", score="0.5", match_status=MatchStatus.NEEDS_REVIEW,
+    )
+    db_session.add(opportunity)
+    db_session.flush()
+
     task = ManualReviewTask(
         candidate_product_id=candidate.id, matched_product_id=matched.id,
         score=45, status=ManualReviewTaskStatus.PENDING, created_at=datetime.now(tz=JST),
@@ -185,6 +217,10 @@ def test_reject_does_not_touch_products(db_session):
     db_session.refresh(task)
     assert task.status == ManualReviewTaskStatus.REJECTED
     assert task.resolved_by == "tester"
+
+    db_session.refresh(opportunity)
+    assert opportunity.match_status == MatchStatus.DIFFERENT_PRODUCT
+    assert opportunity.product_id == candidate.id  # rejectはマージしないのでproduct_idは不変
 
 
 def test_resolving_already_resolved_task_raises(db_session):
@@ -227,6 +263,12 @@ def test_merge_failure_rolls_back_partial_reassignment(db_session, monkeypatch):
     )
     db_session.add(event)
     db_session.flush()
+    opportunity = Opportunity(
+        product_id=candidate.id, event_id=event.id, best_channel_name="suruga_ya",
+        confidence="B", score="0.5", match_status=MatchStatus.NEEDS_REVIEW,
+    )
+    db_session.add(opportunity)
+    db_session.flush()
 
     task = ManualReviewTask(
         candidate_product_id=candidate.id, matched_product_id=matched.id,
@@ -255,3 +297,8 @@ def test_merge_failure_rolls_back_partial_reassignment(db_session, monkeypatch):
 
     db_session.refresh(task)
     assert task.status == ManualReviewTaskStatus.PENDING  # タスク自体も未解決のまま
+
+    # _update_opportunity_match_status()による更新も同じSAVEPOINT内のため、
+    # 例外発生時はこちらもロールバックされ、NEEDS_REVIEWのまま残ること。
+    db_session.refresh(opportunity)
+    assert opportunity.match_status == MatchStatus.NEEDS_REVIEW

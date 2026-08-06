@@ -18,12 +18,31 @@ from pathlib import Path
 import pytest
 
 from app.collectors.base import ParseError, RawFetchResult
-from app.collectors.markets.suruga_ya import CATEGORY_GUNDAM, CATEGORY_ONE_PIECE_CARD, JST, SurugaYaCollector
+from app.collectors.markets.suruga_ya import (
+    CATEGORY_DUEL_MASTERS,
+    CATEGORY_GUNDAM,
+    CATEGORY_NINTENDO_SWITCH,
+    CATEGORY_ONE_PIECE_CARD,
+    CATEGORY_YUGIOH,
+    JST,
+    SurugaYaCollector,
+)
 
 RAW_HTML_FIXTURE_PATH = Path(__file__).parent.parent / "fixtures" / "raw_html" / "raw_suruga_ya_search.html"
 GRADED_RAW_HTML_FIXTURE_PATH = Path(__file__).parent.parent / "fixtures" / "raw_html" / "raw_suruga_ya_graded.html"
 ONE_PIECE_RAW_HTML_FIXTURE_PATH = Path(__file__).parent.parent / "fixtures" / "raw_html" / "raw_suruga_ya_onepiece.html"
 GUNDAM_RAW_HTML_FIXTURE_PATH = Path(__file__).parent.parent / "fixtures" / "raw_html" / "raw_suruga_ya_gundam.html"
+SWITCH_RAW_HTML_FIXTURE_PATH = Path(__file__).parent.parent / "fixtures" / "raw_html" / "raw_suruga_ya_switch.html"
+SWITCH_AMIIBO_RAW_HTML_FIXTURE_PATH = (
+    Path(__file__).parent.parent / "fixtures" / "raw_html" / "raw_suruga_ya_switch_amiibo.html"
+)
+SWITCH_HARDWARE_RAW_HTML_FIXTURE_PATH = (
+    Path(__file__).parent.parent / "fixtures" / "raw_html" / "raw_suruga_ya_switch_hardware.html"
+)
+YUGIOH_RAW_HTML_FIXTURE_PATH = Path(__file__).parent.parent / "fixtures" / "raw_html" / "raw_suruga_ya_yugioh.html"
+DUEL_MASTERS_RAW_HTML_FIXTURE_PATH = (
+    Path(__file__).parent.parent / "fixtures" / "raw_html" / "raw_suruga_ya_duelmasters.html"
+)
 
 HEADER_ROW = """
 <tr>
@@ -450,3 +469,235 @@ def test_parse_observations_extracts_model_number_for_gundam_category():
     for o in with_model:
         assert o.extra["model_number"] != o.extra["jan"]
         assert o.extra["model_number"] != o.extra["management_number"]
+
+
+def test_parse_observations_extracts_alphanumeric_model_number_for_switch_category():
+    """CLAUDE.md 3節「駿河屋Collectorのニンテンドースイッチカテゴリ対応確認」に対応する検証。
+    category=20038(ニンテンドースイッチ)で実際に取得した生HTML(raw_suruga_ya_switch.html)には、
+    ガンダムカテゴリ(型番が数字のみ、例:"5072030")とは異なり、"HAC-P-BQPYA"のような
+    英数字+ハイフン混在の型番が使われている。MODEL_NUMBER_PATTERNの`\\S+`は元々
+    数字限定の実装ではなかったため、コード変更無しでこの形式でも正しく抽出できることを
+    実データ20件全件で確認する。
+    """
+    collector = SurugaYaCollector(category=CATEGORY_NINTENDO_SWITCH)
+    html = SWITCH_RAW_HTML_FIXTURE_PATH.read_text(encoding="utf-8")
+
+    observations = collector.parse_observations(_raw(_search_url(""), html))
+
+    assert len(observations) == 20
+    assert all(o.extra["model_number"] is not None for o in observations)
+
+    sample = next(o for o in observations if o.extra["management_number"] == "109004901")
+    assert sample.extra["model_number"] == "HAC-P-BQPYA"
+    assert sample.extra["jan"] == "4988602180015"
+    assert sample.amount == Decimal("4000")
+
+    # 型番がJAN/管理番号と誤認されていないことの確認(英数字混在でも同様に成立すること)。
+    for o in observations:
+        assert o.extra["model_number"] != o.extra["jan"]
+        assert o.extra["model_number"] != o.extra["management_number"]
+
+
+def test_parse_observations_preserves_category_text_for_switch_category():
+    """CLAUDE.md 3節「駿河屋Collectorのニンテンドースイッチカテゴリ対応確認」に対応する検証。
+    技術分析レポート8章で懸念されていた「同じキーワードでも別商品単位になりうる」問題への
+    対応として、行の商品種別ラベル(class="category"のdiv)をextra["category_text"]として
+    保持するようにした。ニンテンドースイッチカテゴリの実データ20件全てで
+    "ニンテンドースイッチソフト"が正しく抽出できることを確認する
+    (実データが全件ソフトのみのため、周辺機器/amiibo/本体での分岐確認はCLAUDE.md 3節に
+    別途未確認事項として記録している)。
+    """
+    collector = SurugaYaCollector(category=CATEGORY_NINTENDO_SWITCH)
+    html = SWITCH_RAW_HTML_FIXTURE_PATH.read_text(encoding="utf-8")
+
+    observations = collector.parse_observations(_raw(_search_url(""), html))
+
+    assert len(observations) == 20
+    assert all(o.extra["category_text"] == "ニンテンドースイッチソフト" for o in observations)
+
+
+def test_parse_observations_category_text_strips_badge_markup():
+    """[価格上昇中]/[新規追加]等のバッジがcategory divに併記される行でも、
+    category_textにバッジ文言が混入せず商品種別ラベルのみが取れることを確認する。"""
+    collector = SurugaYaCollector(category=CATEGORY_NINTENDO_SWITCH)
+    html = SWITCH_RAW_HTML_FIXTURE_PATH.read_text(encoding="utf-8")
+
+    observations = collector.parse_observations(_raw(_search_url(""), html))
+
+    rising_item = next(o for o in observations if o.extra.get("trend") == "price_rising")
+    assert rising_item.extra["category_text"] == "ニンテンドースイッチソフト"
+
+
+def test_parse_observations_category_text_differs_by_genre():
+    """category_textはニンテンドースイッチ専用の特殊対応ではなく、既存カテゴリ
+    (ガンダムプラモデル)でも一貫して機能する全カテゴリ共通のフィールドであることを確認する。"""
+    collector = SurugaYaCollector(category=CATEGORY_GUNDAM)
+    html = GUNDAM_RAW_HTML_FIXTURE_PATH.read_text(encoding="utf-8")
+
+    observations = collector.parse_observations(_raw(_search_url(""), html))
+
+    assert all(o.extra["category_text"] == "プラモデル" for o in observations)
+
+
+def test_parse_observations_category_text_is_none_when_absent():
+    """class="category"要素を持たない(=テストの再構成Fixtureのような)HTMLでは、
+    category_textがNoneのまま安全に扱われ、例外も発生しないことを確認する。"""
+    collector = SurugaYaCollector()
+
+    observations = collector.parse_observations(_raw(_search_url(), SEARCH_RESULTS_HTML))
+
+    assert all(o.extra["category_text"] is None for o in observations)
+
+
+# --- 遊戯王OCG・デュエル・マスターズカテゴリでの他ジャンル対応確認(2026-08-06) ---
+
+
+def test_parse_observations_supports_yugioh_category_without_code_change():
+    """CLAUDE.md 3節「駿河屋Collectorの遊戯王OCGカテゴリ対応確認」に対応する検証。
+    category=501080040(遊戯王OCG、50108配下)で実際に取得した生HTML
+    (raw_suruga_ya_yugioh.html)を、コード変更無しでそのままparse_observations()に
+    通しても20件全件が正しく抽出できることを確認する。
+    """
+    collector = SurugaYaCollector(category=CATEGORY_YUGIOH)
+    html = YUGIOH_RAW_HTML_FIXTURE_PATH.read_text(encoding="utf-8")
+
+    observations = collector.parse_observations(_raw(_search_url(""), html))
+
+    assert len(observations) == 20
+    assert all(o.extra["management_number"] is not None for o in observations)
+    assert all(o.extra["management_number"].startswith("GU") for o in observations)
+    # トレカ系カテゴリ全般の既知の傾向(CLAUDE.md 1.3)通り、JAN/型番は付与されない。
+    assert all(o.extra["jan"] is None for o in observations)
+    assert all(o.extra["model_number"] is None for o in observations)
+    assert all(o.extra["category_text"].startswith("遊戯王") for o in observations)
+
+    sample = next(o for o in observations if o.extra["management_number"] == "GU807865")
+    assert sample.extra["title"] == "BETB-JP036[UR]：真紅眼の超越黒竜"
+    assert sample.extra["release_date"] == date(2026, 7, 18)
+    assert sample.amount is None
+    assert sample.confidence == "D"
+    assert sample.extra["quote_required"] is True
+
+    rising_items = [o for o in observations if o.extra.get("trend") == "price_rising"]
+    assert len(rising_items) == 6
+
+    quote_required_items = [o for o in observations if o.extra.get("quote_required")]
+    assert len(quote_required_items) == 5
+    assert all(o.amount is None and o.confidence == "D" for o in quote_required_items)
+
+
+def test_parse_observations_supports_duel_masters_category_without_code_change():
+    """CLAUDE.md 3節「駿河屋Collectorのデュエル・マスターズカテゴリ対応確認」に対応する検証。
+    category=501080020(デュエル・マスターズ、50108配下)で実際に取得した生HTML
+    (raw_suruga_ya_duelmasters.html)を、コード変更無しでそのままparse_observations()に
+    通しても20件全件が正しく抽出できることを確認する。
+    """
+    collector = SurugaYaCollector(category=CATEGORY_DUEL_MASTERS)
+    html = DUEL_MASTERS_RAW_HTML_FIXTURE_PATH.read_text(encoding="utf-8")
+
+    observations = collector.parse_observations(_raw(_search_url(""), html))
+
+    assert len(observations) == 20
+    assert all(o.extra["management_number"] is not None for o in observations)
+    assert all(o.extra["management_number"].startswith("GU") for o in observations)
+    assert all(o.extra["jan"] is None for o in observations)
+    assert all(o.extra["model_number"] is None for o in observations)
+    assert all(o.extra["category_text"].startswith("デュエルマスターズ") for o in observations)
+
+    sample = next(o for o in observations if o.extra["management_number"] == "GU760491")
+    assert sample.extra["title"] == "DM1/DM1[DMR]：烈しき切札 ドギラゴン逆"
+    assert sample.extra["release_date"] == date(2026, 6, 13)
+    assert sample.amount == Decimal("4000")
+    assert sample.confidence == "B"
+
+    rising_items = [o for o in observations if o.extra.get("trend") == "price_rising"]
+    assert len(rising_items) == 2
+
+    quote_required_items = [o for o in observations if o.extra.get("quote_required")]
+    assert len(quote_required_items) == 7
+    assert all(o.amount is None and o.confidence == "D" for o in quote_required_items)
+
+
+# --- ニンテンドースイッチhardsoft軸(amiibo/本体)でのcategory_text確認(2026-08-06) ---
+
+
+def test_parse_observations_category_text_identifies_amiibo():
+    """CLAUDE.md 3節「category_textがamiibo/本体でも区別できるか未確認」に対応する検証。
+    category=20038で`restrict[]=hardsoft=amiibo`相当の実HTML
+    (raw_suruga_ya_switch_amiibo.html)を取得したところ、category_textが
+    "ソフト"ではなく"amiibo"という別の値を正しく返すことを実データで確認する。
+    """
+    collector = SurugaYaCollector(category=CATEGORY_NINTENDO_SWITCH)
+    html = SWITCH_AMIIBO_RAW_HTML_FIXTURE_PATH.read_text(encoding="utf-8")
+
+    observations = collector.parse_observations(_raw(_search_url(""), html))
+
+    assert len(observations) == 20
+    assert all(o.extra["category_text"] == "amiibo" for o in observations)
+    # amiiboもJAN/型番は取得できる(ソフト同様、既存実装のまま機能することの確認)。
+    assert all(o.extra["jan"] is not None for o in observations)
+    assert all(o.extra["model_number"] is not None for o in observations)
+
+    sample = next(o for o in observations if o.extra["management_number"] == "106011655")
+    assert sample.extra["title"] == "amiibo ダブルセット[ノア/ミオ] (ゼノブレイドシリーズ)"
+    assert sample.extra["model_number"] == "NVL-E-AZ2A"
+    assert sample.amount == Decimal("1600")
+
+
+def test_parse_observations_category_text_identifies_hardware():
+    """CLAUDE.md 3節「category_textがamiibo/本体でも区別できるか未確認」に対応する検証。
+    category=20038で`restrict[]=hardsoft=本体`相当の実HTML
+    (raw_suruga_ya_switch_hardware.html)を取得したところ、category_textが
+    "ソフト"ではなく"ニンテンドースイッチハード"という、ゲーム機本体という
+    これまでと異なる商品単位を示す値を正しく返すことを実データで確認する。
+    """
+    collector = SurugaYaCollector(category=CATEGORY_NINTENDO_SWITCH)
+    html = SWITCH_HARDWARE_RAW_HTML_FIXTURE_PATH.read_text(encoding="utf-8")
+
+    observations = collector.parse_observations(_raw(_search_url(""), html))
+
+    assert len(observations) == 20
+    assert all(o.extra["category_text"] == "ニンテンドースイッチハード" for o in observations)
+    assert all(o.extra["jan"] is not None for o in observations)
+
+    sample = next(o for o in observations if o.extra["management_number"] == "109105123")
+    assert sample.extra["title"] == "Nintendo Switch Lite本体 ハイラルエディション"
+    assert sample.extra["model_number"] == "HDH-S-DAZAA"
+    assert sample.amount == Decimal("19000")
+
+    # 型番欄が空の1件を除き、型番も既存実装のまま抽出できていることの確認
+    # (ガンダムカテゴリと同様、型番欄自体が空の実データが1件だけ含まれていた)。
+    with_model = [o for o in observations if o.extra["model_number"] is not None]
+    assert len(with_model) == 19
+
+
+def test_parse_observations_category_text_distinguishes_switch_product_units():
+    """技術分析レポート8章で懸念されていた「商品単位の混同」対策の前提確認:
+    同じcategory=20038(ニンテンドースイッチ)でも、hardsoftが異なれば
+    category_textが明確に異なる値を返し、ソフト/amiibo/本体を区別できることを
+    3種類のFixtureを横断して確認する(Product Matcher側でこの値を実際に
+    照合スコアリングへ組み込むかどうかはCLAUDE.md 3節に別課題として記録、未着手)。
+    """
+    collector = SurugaYaCollector(category=CATEGORY_NINTENDO_SWITCH)
+
+    software = collector.parse_observations(
+        _raw(_search_url(""), SWITCH_RAW_HTML_FIXTURE_PATH.read_text(encoding="utf-8"))
+    )
+    amiibo = collector.parse_observations(
+        _raw(_search_url(""), SWITCH_AMIIBO_RAW_HTML_FIXTURE_PATH.read_text(encoding="utf-8"))
+    )
+    hardware = collector.parse_observations(
+        _raw(_search_url(""), SWITCH_HARDWARE_RAW_HTML_FIXTURE_PATH.read_text(encoding="utf-8"))
+    )
+
+    software_texts = {o.extra["category_text"] for o in software}
+    amiibo_texts = {o.extra["category_text"] for o in amiibo}
+    hardware_texts = {o.extra["category_text"] for o in hardware}
+
+    assert software_texts == {"ニンテンドースイッチソフト"}
+    assert amiibo_texts == {"amiibo"}
+    assert hardware_texts == {"ニンテンドースイッチハード"}
+    # 3種類とも互いに異なる値であること(混同していないこと)の直接確認。
+    assert software_texts.isdisjoint(amiibo_texts)
+    assert software_texts.isdisjoint(hardware_texts)
+    assert amiibo_texts.isdisjoint(hardware_texts)
